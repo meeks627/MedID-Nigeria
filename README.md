@@ -14,6 +14,16 @@ Unlike traditional Electronic Health Record (EHR) systems, MedID does **not** re
 
 https://med-id-nigeria-3ucs.vercel.app/
 
+### 🔑 Demo Credentials
+
+| Role | ID / Email | Password / PIN |
+|------|-----------|----------------|
+| 🏥 Hospital Admin | `LUTH` | `ADMIN123` |
+| 👨‍⚕️ Doctor | `james.bello@luth.org` | License: `MDN-2015-8831` |
+| 👤 Patient | `MD38281726` (Sarah Johnson) | PIN: `1234` |
+
+> You can also **register new** hospitals, doctors, and patients directly inside the app.
+
 ---
 
 ## 📖 How to Explore MedID
