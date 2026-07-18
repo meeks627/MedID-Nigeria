@@ -11,7 +11,7 @@ import {
   addLog, getLogsByHospital,
   getNextHospitalId, getNextDoctorId, getNextLogId, getNextMedID,
   getDoctors, getPatients, getLogs,
-} from "./db";
+} from "./lib/db";
 
 dotenv.config();
 
