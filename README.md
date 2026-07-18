@@ -1,20 +1,28 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# MedID V4 — National Healthcare Identity Platform
 
-# Run and deploy your AI Studio app
-
-This contains everything you need to run your app locally.
-
-View your app in AI Studio: https://ai.studio/apps/1c9b54fd-3716-4a0f-9bb3-64bebc7149c8
+A National Healthcare Identity and Record Interoperability Platform for identity verification, record discovery, and AI clinical briefings.
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
-
+**Prerequisites:** Node.js
 
 1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+   ```
+   npm install
+   ```
+2. Set the `GEMINI_API_KEY` in `.env` to your Gemini API key (optional — runs with offline fallback)
 3. Run the app:
-   `npm run dev`
+   ```
+   npm run dev
+   ```
+4. Visit **http://localhost:3000**
+
+## Deploy on Render
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+
+1. Connect your GitHub repo
+2. Use **Web Service** type
+3. Build command: `npm run build`
+4. Start command: `node dist/server.cjs`
+5. Set `NODE_ENV=production` environment variable
