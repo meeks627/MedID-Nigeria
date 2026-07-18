@@ -31,6 +31,7 @@ export default function AdminPortal({ onBack }: AdminPortalProps) {
   const [newDocPhone, setNewDocPhone] = useState("");
   const [newDocLicense, setNewDocLicense] = useState("");
   const [newDocDept, setNewDocDept] = useState("General Practice");
+  const [isCustomDept, setIsCustomDept] = useState(false);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -119,6 +120,7 @@ export default function AdminPortal({ onBack }: AdminPortalProps) {
       setNewDocPhone("");
       setNewDocLicense("");
       setNewDocDept("General Practice");
+      setIsCustomDept(false);
     } catch (err) {
       setError("Failed to register clinician.");
     }
@@ -396,8 +398,16 @@ export default function AdminPortal({ onBack }: AdminPortalProps) {
                       <div>
                         <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Department / Specialty *</label>
                         <select
-                          value={newDocDept}
-                          onChange={(e) => setNewDocDept(e.target.value)}
+                          value={isCustomDept ? "Other" : newDocDept}
+                          onChange={(e) => {
+                            if (e.target.value === "Other") {
+                              setIsCustomDept(true);
+                              setNewDocDept("Other");
+                            } else {
+                              setIsCustomDept(false);
+                              setNewDocDept(e.target.value);
+                            }
+                          }}
                           className="w-full rounded-lg border border-slate-300 py-2.5 px-3 text-sm focus:outline-none focus:border-teal-500 bg-white"
                         >
                           <option value="General Practice">General Practice</option>
@@ -406,7 +416,17 @@ export default function AdminPortal({ onBack }: AdminPortalProps) {
                           <option value="Orthopedics">Orthopedics</option>
                           <option value="General Surgery">General Surgery</option>
                           <option value="Emergency Medicine">Emergency Medicine</option>
+                          <option value="Other">Other</option>
                         </select>
+                        {isCustomDept && (
+                          <input
+                            type="text"
+                            placeholder="Specify Specialty (e.g. Sports Medicine, Clinical Informatics)"
+                            value={newDocDept === "Other" ? "" : newDocDept}
+                            onChange={(e) => setNewDocDept(e.target.value)}
+                            className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500 bg-white mt-2"
+                          />
+                        )}
                       </div>
                       <div className="col-span-1 md:col-span-2">
                         <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">Phone Number</label>
