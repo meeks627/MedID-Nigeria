@@ -378,6 +378,13 @@ const AUDIT_LOGS: AccessLog[] = [
   },
 ];
 
+const ADMIN_PASSWORDS: { [hospitalId: string]: string } = {
+  LUTH: "ADMIN123",
+  LASUTH: "ADMIN123",
+  Evercare: "ADMIN123",
+};
+
+let hospitalIdCounter = 1;
 let medIDCounter = 38281727;
 
 app.get("/api/health", (req, res) => {
@@ -506,14 +513,15 @@ app.post("/api/doctor/login", (req, res) => {
 });
 
 app.post("/api/admin/login", (req, res) => {
-  const { hospitalId, accessKey } = req.body;
+  const { hospitalId, password } = req.body;
   const hospital = REGISTRY_HOSPITALS.find((h) => h.id === hospitalId);
 
   if (!hospital) {
     return res.status(404).json({ error: "Hospital not registered on MedID platform." });
   }
 
-  if (accessKey !== "ADMIN123") {
+  const expectedPassword = ADMIN_PASSWORDS[hospitalId];
+  if (!expectedPassword || password !== expectedPassword) {
     return res.status(401).json({ error: "Invalid Hospital Administrator credentials." });
   }
 
@@ -526,6 +534,76 @@ app.post("/api/admin/login", (req, res) => {
       emergencyOverrideCode: hospital.emergencyOverrideCode,
       codeGeneratedAt: hospital.codeGeneratedAt,
     },
+  });
+});
+
+app.get("/api/admin/hospitals", (req, res) => {
+  const list = REGISTRY_HOSPITALS.map((h) => ({ id: h.id, name: h.name }));
+  res.json(list);
+});
+
+app.post("/api/admin/register", (req, res) => {
+  const {
+    hospitalName, hospitalType, registrationNumber,
+    email, phone, website,
+    country, state, city, address,
+    adminName, adminPosition, adminEmail, adminPhone, adminNIN,
+    password, ehrSystem, customEHR,
+  } = req.body;
+
+  if (!hospitalName || !registrationNumber || !adminName || !adminEmail || !password) {
+    return res.status(400).json({ error: "Required fields missing." });
+  }
+
+  const existingReg = REGISTRY_HOSPITALS.find((h) => h.name === hospitalName);
+  if (existingReg) {
+    return res.status(409).json({ error: "This hospital is already registered on MedID." });
+  }
+
+  const idStr = String(hospitalIdCounter++).padStart(6, "0");
+  const hospitalId = `HSP${idStr}`;
+
+  const randomDigits = Math.floor(1000 + Math.random() * 9000);
+  const emergencyCode = `MDEM-${randomDigits}`;
+
+  const newHospital: HospitalProfile = {
+    id: hospitalId,
+    name: hospitalName,
+    address: `${address || ""}, ${city || ""}, ${state || ""}, ${country || "Nigeria"}`,
+    emergencyOverrideCode: emergencyCode,
+    codeGeneratedAt: new Date(),
+  };
+
+  REGISTRY_HOSPITALS.push(newHospital);
+  ADMIN_PASSWORDS[hospitalId] = password;
+
+  const registrationData = {
+    hospitalId,
+    hospitalName,
+    hospitalType: hospitalType || "",
+    registrationNumber,
+    email,
+    phone,
+    website,
+    country: country || "Nigeria",
+    state,
+    city,
+    address,
+    adminName,
+    adminPosition,
+    adminEmail,
+    adminPhone,
+    adminNIN,
+    ehrSystem: ehrSystem || "None",
+    customEHR: customEHR || "",
+    emergencyCode,
+  };
+
+  res.json({
+    success: true,
+    hospitalId,
+    hospitalName,
+    emergencyOverrideCode: emergencyCode,
   });
 });
 

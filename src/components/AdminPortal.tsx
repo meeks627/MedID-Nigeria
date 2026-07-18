@@ -2,7 +2,9 @@ import React, { useState, useEffect } from "react";
 import { 
   Shield, Building2, UserPlus, Users, Key, FileText, 
   BarChart3, RefreshCw, AlertCircle, CheckCircle2, 
-  ArrowLeft, EyeOff, Check, Ban, Activity, Landmark 
+  ArrowLeft, EyeOff, Check, Ban, Activity, Landmark,
+  Loader2, Globe, Mail, Phone, MapPin, User, BookOpen,
+  ExternalLink, ClipboardList
 } from "lucide-react";
 import { Doctor, PatientProfile, AccessLog, HospitalProfile } from "../types";
 
@@ -10,22 +12,63 @@ interface AdminPortalProps {
   onBack: () => void;
 }
 
+const VERIFICATION_STEPS = [
+  "Verifying Hospital Registration Number...",
+  "Checking Ministry of Health records...",
+  "Creating Hospital Profile...",
+  "Generating MedID Hospital ID...",
+  "Creating Administrator Account...",
+];
+
+type ViewState = "LOGIN" | "REGISTER" | "VERIFYING" | "SUCCESS" | "DASHBOARD";
+
 export default function AdminPortal({ onBack }: AdminPortalProps) {
-  // Authentication & View states
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [hospitalId, setHospitalId] = useState("LUTH");
-  const [accessKey, setAccessKey] = useState("");
+  // Top-level view state
+  const [view, setView] = useState<ViewState>("LOGIN");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [activeTab, setActiveTab] = useState<"DOCTORS" | "PATIENTS" | "EMERGENCY" | "LOGS" | "STATS">("DOCTORS");
 
-  // Hospital and Resource States
+  // Login state
+  const [hospitalId, setHospitalId] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+
+  // Registration form state
+  const [reg, setReg] = useState({
+    hospitalName: "",
+    hospitalType: "Public",
+    registrationNumber: "",
+    email: "",
+    phone: "",
+    website: "",
+    country: "Nigeria",
+    state: "",
+    city: "",
+    address: "",
+    adminName: "",
+    adminPosition: "",
+    adminEmail: "",
+    adminPhone: "",
+    adminNIN: "",
+    password: "",
+    confirmPassword: "",
+    ehrSystem: "None",
+    customEHR: "",
+  });
+  const [isCustomHospitalType, setIsCustomHospitalType] = useState(false);
+  const [isCustomEHR, setIsCustomEHR] = useState(false);
+
+  // Verification state
+  const [verificationStep, setVerificationStep] = useState(0);
+  const [regResult, setRegResult] = useState<{ hospitalId: string; hospitalName: string; emergencyCode: string } | null>(null);
+
+  // Dashboard state
   const [hospital, setHospital] = useState<HospitalProfile | null>(null);
   const [doctors, setDoctors] = useState<Doctor[]>([]);
   const [visitedPatients, setVisitedPatients] = useState<PatientProfile[]>([]);
   const [accessLogs, setAccessLogs] = useState<AccessLog[]>([]);
+  const [activeTab, setActiveTab] = useState<"DOCTORS" | "PATIENTS" | "EMERGENCY" | "LOGS" | "STATS">("DOCTORS");
 
-  // Registration states for Doctor
+  // Registration states for Doctor (dashboard)
   const [newDocName, setNewDocName] = useState("");
   const [newDocEmail, setNewDocEmail] = useState("");
   const [newDocPhone, setNewDocPhone] = useState("");
@@ -33,11 +76,13 @@ export default function AdminPortal({ onBack }: AdminPortalProps) {
   const [newDocDept, setNewDocDept] = useState("General Practice");
   const [isCustomDept, setIsCustomDept] = useState(false);
 
+  const updateReg = (field: string, value: string) => setReg(prev => ({ ...prev, [field]: value }));
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
-    if (!accessKey) {
-      setError("Please input your admin access credentials.");
+    if (!hospitalId || !loginPassword) {
+      setError("Please enter your Hospital ID and password.");
       return;
     }
 
@@ -45,7 +90,7 @@ export default function AdminPortal({ onBack }: AdminPortalProps) {
       const response = await fetch("/api/admin/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ hospitalId, accessKey }),
+        body: JSON.stringify({ hospitalId, password: loginPassword }),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -54,10 +99,71 @@ export default function AdminPortal({ onBack }: AdminPortalProps) {
       }
 
       setHospital(data.hospital);
-      setIsLoggedIn(true);
+      setView("DASHBOARD");
       fetchResources(hospitalId);
     } catch (err) {
       setError("Unable to connect to the administration node.");
+    }
+  };
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+
+    if (!reg.hospitalName || !reg.registrationNumber || !reg.adminName || !reg.adminEmail || !reg.password) {
+      setError("Please complete all required fields.");
+      return;
+    }
+    if (reg.password !== reg.confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+
+    setView("VERIFYING");
+    setVerificationStep(0);
+    setRegResult(null);
+
+    for (let i = 0; i < VERIFICATION_STEPS.length; i++) {
+      await new Promise(r => setTimeout(r, 800 + Math.random() * 600));
+      setVerificationStep(i + 1);
+    }
+
+    try {
+      const response = await fetch("/api/admin/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          hospitalName: reg.hospitalName,
+          hospitalType: reg.hospitalType,
+          registrationNumber: reg.registrationNumber,
+          email: reg.email,
+          phone: reg.phone,
+          website: reg.website,
+          country: reg.country,
+          state: reg.state,
+          city: reg.city,
+          address: reg.address,
+          adminName: reg.adminName,
+          adminPosition: reg.adminPosition,
+          adminEmail: reg.adminEmail,
+          adminPhone: reg.adminPhone,
+          adminNIN: reg.adminNIN,
+          password: reg.password,
+          ehrSystem: reg.ehrSystem,
+          customEHR: reg.customEHR,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setError(data.error || "Registration failed.");
+        setView("REGISTER");
+        return;
+      }
+      setRegResult(data);
+      setView("SUCCESS");
+    } catch (err) {
+      setError("Unable to connect to MedID registration service.");
+      setView("REGISTER");
     }
   };
 
@@ -183,7 +289,7 @@ export default function AdminPortal({ onBack }: AdminPortalProps) {
         <div className="max-w-7xl mx-auto flex justify-between items-center">
           <div className="flex items-center space-x-3">
             <button 
-              onClick={isLoggedIn ? () => setIsLoggedIn(false) : onBack}
+              onClick={view === "DASHBOARD" ? () => setView("LOGIN") : onBack}
               className="text-slate-500 hover:text-slate-800 p-1.5 rounded-lg hover:bg-slate-100 transition-colors"
             >
               <ArrowLeft className="w-5 h-5" />
@@ -197,7 +303,7 @@ export default function AdminPortal({ onBack }: AdminPortalProps) {
               </span>
             </div>
           </div>
-          {isLoggedIn && hospital && (
+          {view === "DASHBOARD" && hospital && (
             <div className="flex items-center space-x-4">
               <div className="text-right hidden sm:block">
                 <span className="block text-[10px] font-mono font-bold uppercase text-teal-700 bg-teal-50 px-2 py-0.5 rounded-md border border-teal-200">
@@ -205,7 +311,7 @@ export default function AdminPortal({ onBack }: AdminPortalProps) {
                 </span>
               </div>
               <button
-                onClick={() => setIsLoggedIn(false)}
+                onClick={() => setView("LOGIN")}
                 className="text-xs font-semibold text-rose-600 hover:bg-rose-50 px-3 py-1.5 rounded-lg transition-colors"
               >
                 Exit Domain
@@ -233,56 +339,305 @@ export default function AdminPortal({ onBack }: AdminPortalProps) {
           </div>
         )}
 
-        {/* ADMIN AUTH FLOW */}
-        {!isLoggedIn && (
-          <div className="max-w-md mx-auto w-full bg-white border border-slate-200 rounded-2xl p-8 shadow-sm">
-            <div className="text-center mb-8">
-              <h2 className="font-display text-2xl font-bold text-slate-900">Domain Authentication</h2>
-              <p className="text-sm text-slate-500 mt-1">Access requires verified institution credentials.</p>
-            </div>
-
-            <form onSubmit={handleLogin} className="space-y-5" id="admin-login-form">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Hospital Affiliation</label>
-                <select
-                  value={hospitalId}
-                  onChange={(e) => setHospitalId(e.target.value)}
-                  className="w-full rounded-xl border border-slate-300 py-2.5 px-3.5 text-sm focus:border-teal-500 focus:ring-1 focus:ring-teal-500 focus:outline-none"
-                >
-                  <option value="LUTH">Lagos University Teaching Hospital (LUTH)</option>
-                  <option value="LASUTH">Lagos State University Teaching Hospital (LASUTH)</option>
-                  <option value="Evercare">Evercare Hospital Lekki</option>
-                </select>
-              </div>
-
-              <div>
-                <div className="flex justify-between items-center mb-2">
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">Admin Access Key</label>
-                  <span className="text-[10px] text-teal-600 bg-teal-50 px-2 py-0.5 rounded font-mono border border-teal-100">Dev Key: ADMIN123</span>
+        {/* AUTH FLOW: LOGIN, REGISTER, VERIFYING, SUCCESS */}
+        {view !== "DASHBOARD" && (
+          <>
+            {/* LOGIN VIEW */}
+            {view === "LOGIN" && (
+              <div className="max-w-md mx-auto w-full bg-white border border-slate-200 rounded-2xl p-8 shadow-sm">
+                <div className="text-center mb-8">
+                  <div className="bg-teal-600 text-white w-12 h-12 rounded-xl flex items-center justify-center mx-auto mb-4">
+                    <Building2 className="w-6 h-6" />
+                  </div>
+                  <h2 className="font-display text-2xl font-bold text-slate-900">Hospital Administrator Login</h2>
+                  <p className="text-sm text-slate-500 mt-1">Access the MedID National Hospital Network.</p>
                 </div>
-                <input
-                  type="password"
-                  required
-                  placeholder="Enter administrator passcode"
-                  value={accessKey}
-                  onChange={(e) => setAccessKey(e.target.value)}
-                  className="w-full rounded-xl border border-slate-300 py-2.5 px-3.5 text-sm focus:border-teal-500 focus:ring-1 focus:ring-teal-500 focus:outline-none"
-                />
-              </div>
 
-              <button
-                type="submit"
-                id="admin-login-submit"
-                className="w-full bg-teal-600 text-white font-medium text-sm py-3 px-4 rounded-xl hover:bg-teal-700 transition-colors shadow-sm focus:outline-none"
-              >
-                Authenticate Institutional Node
-              </button>
-            </form>
-          </div>
+                <form onSubmit={handleLogin} className="space-y-5" id="admin-login-form">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Hospital ID</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. LUTH, HSP000001"
+                      value={hospitalId}
+                      onChange={(e) => setHospitalId(e.target.value)}
+                      className="w-full rounded-xl border border-slate-300 py-2.5 px-3.5 text-sm focus:border-teal-500 focus:ring-1 focus:ring-teal-500 focus:outline-none"
+                    />
+                    <p className="text-[10px] text-slate-400 mt-1">Enter your MedID Hospital ID or short code.</p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Password</label>
+                    <input
+                      type="password"
+                      required
+                      placeholder="Enter administrator password"
+                      value={loginPassword}
+                      onChange={(e) => setLoginPassword(e.target.value)}
+                      className="w-full rounded-xl border border-slate-300 py-2.5 px-3.5 text-sm focus:border-teal-500 focus:ring-1 focus:ring-teal-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    id="admin-login-submit"
+                    className="w-full bg-teal-600 text-white font-medium text-sm py-3 px-4 rounded-xl hover:bg-teal-700 transition-colors shadow-sm focus:outline-none"
+                  >
+                    Sign In
+                  </button>
+                </form>
+
+                <div className="mt-8 pt-6 border-t border-slate-200 text-center">
+                  <p className="text-xs text-slate-500 mb-3">Don't have a MedID Hospital Account?</p>
+                  <button
+                    onClick={() => { setView("REGISTER"); setError(""); }}
+                    className="text-sm font-bold text-teal-600 hover:text-teal-800 hover:underline transition-colors"
+                  >
+                    Register Hospital
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* REGISTER VIEW */}
+            {view === "REGISTER" && (
+              <div className="max-w-2xl mx-auto w-full bg-white border border-slate-200 rounded-2xl p-8 shadow-sm">
+                <div className="text-center mb-6">
+                  <h2 className="font-display text-2xl font-bold text-slate-900">Hospital Registration</h2>
+                  <p className="text-sm text-slate-500 mt-1">Register your hospital to join the MedID National Healthcare Network.</p>
+                </div>
+
+                <form onSubmit={handleRegister} className="space-y-6">
+                  {/* HOSPITAL DETAILS */}
+                  <div className="bg-slate-50 rounded-xl p-5 border border-slate-200">
+                    <h3 className="text-sm font-bold text-slate-800 flex items-center space-x-2 mb-4">
+                      <Building2 className="w-4 h-4 text-teal-600" />
+                      <span>Hospital Details</span>
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="md:col-span-2">
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Hospital Name *</label>
+                        <input type="text" required placeholder="e.g. Lagos University Teaching Hospital" value={reg.hospitalName} onChange={(e) => updateReg("hospitalName", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Hospital Type *</label>
+                        <select value={isCustomHospitalType ? "Other" : reg.hospitalType} onChange={(e) => { if (e.target.value === "Other") { setIsCustomHospitalType(true); updateReg("hospitalType", "Other"); } else { setIsCustomHospitalType(false); updateReg("hospitalType", e.target.value); } }} className="w-full rounded-lg border border-slate-300 py-2.5 px-3 text-sm focus:outline-none focus:border-teal-500 bg-white">
+                          <option value="Public">Public</option>
+                          <option value="Private">Private</option>
+                          <option value="Teaching Hospital">Teaching Hospital</option>
+                          <option value="Specialist Hospital">Specialist Hospital</option>
+                          <option value="Primary Health Centre">Primary Health Centre</option>
+                          <option value="Diagnostic Centre">Diagnostic Centre</option>
+                          <option value="Other">Other</option>
+                        </select>
+                        {isCustomHospitalType && (
+                          <input type="text" placeholder="Specify hospital type" value={reg.hospitalType === "Other" ? "" : reg.hospitalType} onChange={(e) => updateReg("hospitalType", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500 bg-white mt-2" />
+                        )}
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Hospital Registration / License Number *</label>
+                        <input type="text" required placeholder="e.g. LAG-HSP-001245" value={reg.registrationNumber} onChange={(e) => updateReg("registrationNumber", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                        <p className="text-[10px] text-slate-400 mt-1">This is the hospital's unique identifier before joining MedID.</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* HOSPITAL CONTACT */}
+                  <div className="bg-slate-50 rounded-xl p-5 border border-slate-200">
+                    <h3 className="text-sm font-bold text-slate-800 flex items-center space-x-2 mb-4">
+                      <MapPin className="w-4 h-4 text-teal-600" />
+                      <span>Hospital Contact</span>
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Official Email *</label>
+                        <input type="email" required placeholder="admin@hospital.gov" value={reg.email} onChange={(e) => updateReg("email", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Official Phone Number *</label>
+                        <input type="tel" required placeholder="+234-800-..." value={reg.phone} onChange={(e) => updateReg("phone", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Website</label>
+                        <input type="url" placeholder="https://hospital.ng" value={reg.website} onChange={(e) => updateReg("website", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Country</label>
+                        <select value={reg.country} onChange={(e) => updateReg("country", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2.5 px-3 text-sm focus:outline-none focus:border-teal-500 bg-white">
+                          <option value="Nigeria">Nigeria</option>
+                          <option value="Ghana">Ghana</option>
+                          <option value="Kenya">Kenya</option>
+                          <option value="South Africa">South Africa</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">State *</label>
+                        <input type="text" required placeholder="e.g. Lagos" value={reg.state} onChange={(e) => updateReg("state", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">City</label>
+                        <input type="text" placeholder="e.g. Ikeja" value={reg.city} onChange={(e) => updateReg("city", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                      </div>
+                      <div className="md:col-span-2">
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Full Address *</label>
+                        <input type="text" required placeholder="Street, building, landmark" value={reg.address} onChange={(e) => updateReg("address", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* ADMIN INFO */}
+                  <div className="bg-slate-50 rounded-xl p-5 border border-slate-200">
+                    <h3 className="text-sm font-bold text-slate-800 flex items-center space-x-2 mb-4">
+                      <User className="w-4 h-4 text-teal-600" />
+                      <span>Administrator Information</span>
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Full Name *</label>
+                        <input type="text" required placeholder="e.g. Dr. Adebayo Ogunlesi" value={reg.adminName} onChange={(e) => updateReg("adminName", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Position / Title</label>
+                        <input type="text" placeholder="e.g. Chief Medical Director" value={reg.adminPosition} onChange={(e) => updateReg("adminPosition", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Official Email *</label>
+                        <input type="email" required placeholder="admin@hospital.gov" value={reg.adminEmail} onChange={(e) => updateReg("adminEmail", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Phone Number</label>
+                        <input type="tel" placeholder="+234-..." value={reg.adminPhone} onChange={(e) => updateReg("adminPhone", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">National ID / NIN</label>
+                        <input type="text" placeholder="11-digit NIN (simulated)" value={reg.adminNIN} onChange={(e) => updateReg("adminNIN", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                        <p className="text-[10px] text-slate-400 mt-1">National Identity Number for MVP simulation.</p>
+                      </div>
+                      <div></div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Password *</label>
+                        <input type="password" required placeholder="Create admin password" value={reg.password} onChange={(e) => updateReg("password", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Confirm Password *</label>
+                        <input type="password" required placeholder="Confirm password" value={reg.confirmPassword} onChange={(e) => updateReg("confirmPassword", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500" />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* EXISTING EHR */}
+                  <div className="bg-slate-50 rounded-xl p-5 border border-slate-200">
+                    <h3 className="text-sm font-bold text-slate-800 flex items-center space-x-2 mb-4">
+                      <BookOpen className="w-4 h-4 text-teal-600" />
+                      <span>Existing EHR System</span>
+                    </h3>
+                    <div>
+                      <select value={isCustomEHR ? "Custom" : reg.ehrSystem} onChange={(e) => { if (e.target.value === "Custom") { setIsCustomEHR(true); updateReg("ehrSystem", "Custom"); } else { setIsCustomEHR(false); updateReg("ehrSystem", e.target.value); } }} className="w-full rounded-lg border border-slate-300 py-2.5 px-3 text-sm focus:outline-none focus:border-teal-500 bg-white">
+                        <option value="Helium Health">Helium Health</option>
+                        <option value="Interswitch eClinic">Interswitch eClinic</option>
+                        <option value="OpenMRS">OpenMRS</option>
+                        <option value="Bahmni">Bahmni</option>
+                        <option value="Epic">Epic</option>
+                        <option value="Cerner">Cerner</option>
+                        <option value="Custom">Custom</option>
+                        <option value="None">None</option>
+                      </select>
+                      {isCustomEHR && (
+                        <input type="text" placeholder="Specify EHR system" value={reg.customEHR} onChange={(e) => updateReg("customEHR", e.target.value)} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:border-teal-500 bg-white mt-2" />
+                      )}
+                    </div>
+                  </div>
+
+                  {/* SUBMIT */}
+                  <div className="flex justify-between items-center pt-2">
+                    <button type="button" onClick={() => { setView("LOGIN"); setError(""); }} className="text-sm text-slate-500 hover:text-slate-800 transition-colors">
+                      Back to Login
+                    </button>
+                    <button type="submit" className="bg-teal-600 text-white font-bold text-sm py-3 px-6 rounded-xl hover:bg-teal-700 transition-colors shadow-sm">
+                      Register Hospital on MedID
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
+            {/* VERIFYING VIEW */}
+            {view === "VERIFYING" && (
+              <div className="max-w-md mx-auto w-full bg-white border border-slate-200 rounded-2xl p-8 shadow-sm text-center">
+                <div className="mb-6">
+                  <div className="w-16 h-16 bg-teal-100 rounded-full flex items-center justify-center mx-auto">
+                    <Loader2 className="w-8 h-8 text-teal-600 animate-spin" />
+                  </div>
+                </div>
+                <h2 className="font-display text-xl font-bold text-slate-900 mb-6">Registering Hospital...</h2>
+                <div className="space-y-3 text-left max-w-sm mx-auto">
+                  {VERIFICATION_STEPS.map((step, i) => (
+                    <div key={i} className={`flex items-center space-x-3 p-2 rounded-lg transition-all ${i < verificationStep ? "text-emerald-700" : i === verificationStep ? "text-teal-700 bg-teal-50" : "text-slate-400"}`}>
+                      {i < verificationStep ? (
+                        <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0" />
+                      ) : i === verificationStep ? (
+                        <Loader2 className="w-5 h-5 text-teal-600 animate-spin shrink-0" />
+                      ) : (
+                        <div className="w-5 h-5 rounded-full border-2 border-slate-300 shrink-0" />
+                      )}
+                      <span className="text-sm font-medium">{step}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* SUCCESS VIEW */}
+            {view === "SUCCESS" && regResult && (
+              <div className="max-w-md mx-auto w-full bg-white border border-slate-200 rounded-2xl p-8 shadow-sm">
+                <div className="text-center mb-6">
+                  <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <CheckCircle2 className="w-8 h-8 text-emerald-600" />
+                  </div>
+                  <h2 className="font-display text-xl font-bold text-slate-900">Hospital Successfully Connected to MedID</h2>
+                  <p className="text-sm text-slate-500 mt-1">Your hospital is now part of the National Healthcare Network.</p>
+                </div>
+
+                <div className="bg-slate-900 text-white rounded-2xl p-6 mb-6 text-center space-y-4">
+                  <div>
+                    <span className="block text-[10px] font-mono text-teal-400 font-bold uppercase tracking-widest">Your MedID Hospital ID</span>
+                    <span className="block text-3xl font-mono font-extrabold tracking-wider text-teal-400 mt-1">
+                      {regResult.hospitalId}
+                    </span>
+                  </div>
+                  <div className="border-t border-white/10 pt-4">
+                    <span className="block text-[10px] font-mono text-slate-400 uppercase">Emergency Override Code</span>
+                    <span className="block text-lg font-mono font-bold text-amber-400 mt-1">
+                      {regResult.emergencyCode}
+                    </span>
+                    <p className="text-[10px] text-slate-500 mt-2">In production, this code rotates automatically every 14 days. You can regenerate it from Settings.</p>
+                  </div>
+                </div>
+
+                <div className="bg-teal-50 border border-teal-200 rounded-xl p-4 text-sm text-teal-800 mb-6">
+                  <p className="font-medium">Use <strong>{regResult.hospitalId}</strong> together with your password to sign in.</p>
+                  <p className="text-xs mt-2">A confirmation email has been simulated.</p>
+                </div>
+
+                <button
+                  onClick={() => {
+                    setHospitalId(regResult.hospitalId);
+                    setLoginPassword("");
+                    setError("");
+                    setView("LOGIN");
+                  }}
+                  className="w-full bg-teal-600 text-white font-bold text-sm py-3 px-4 rounded-xl hover:bg-teal-700 transition-colors shadow-sm"
+                >
+                  Continue to Login
+                </button>
+              </div>
+            )}
+          </>
         )}
 
-        {/* LOGGED IN WORKSPACE */}
-        {isLoggedIn && hospital && (
+        {/* DASHBOARD WORKSPACE */}
+        {view === "DASHBOARD" && hospital && (
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
             
             {/* Sidebar Controls */}
