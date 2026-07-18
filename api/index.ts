@@ -1,8 +1,31 @@
 import express from "express";
 import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
 import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
+
+const DATA_FILE = path.join("/tmp", "medid-data.json");
+
+function loadPersistentData(): { hospitals: any[]; adminPasswords: Record<string, string> } {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      return JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+    }
+  } catch (e) {
+    console.error("Failed to load persistent data:", e);
+  }
+  return { hospitals: [], adminPasswords: {} };
+}
+
+function savePersistentData(data: { hospitals: any[]; adminPasswords: Record<string, string> }) {
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data), "utf-8");
+  } catch (e) {
+    console.error("Failed to save persistent data:", e);
+  }
+}
 
 export const app = express();
 app.use(express.json());
@@ -384,7 +407,11 @@ const ADMIN_PASSWORDS: { [hospitalId: string]: string } = {
   Evercare: "ADMIN123",
 };
 
-let hospitalIdCounter = 1;
+const persistentData = loadPersistentData();
+const REGISTERED_HOSPITALS: HospitalProfile[] = persistentData.hospitals;
+const REGISTERED_PASSWORDS: Record<string, string> = persistentData.adminPasswords;
+
+let hospitalIdCounter = REGISTERED_HOSPITALS.length + 1;
 let medIDCounter = 38281727;
 
 app.get("/api/health", (req, res) => {
@@ -514,13 +541,20 @@ app.post("/api/doctor/login", (req, res) => {
 
 app.post("/api/admin/login", (req, res) => {
   const { hospitalId, password } = req.body;
-  const hospital = REGISTRY_HOSPITALS.find((h) => h.id === hospitalId);
+  let hospital = REGISTRY_HOSPITALS.find((h) => h.id === hospitalId);
+  if (!hospital) {
+    hospital = REGISTERED_HOSPITALS.find((h) => h.id === hospitalId);
+  }
 
   if (!hospital) {
     return res.status(404).json({ error: "Hospital not registered on MedID platform." });
   }
 
-  const expectedPassword = ADMIN_PASSWORDS[hospitalId];
+  let expectedPassword = ADMIN_PASSWORDS[hospitalId];
+  if (!expectedPassword) {
+    expectedPassword = REGISTERED_PASSWORDS[hospitalId];
+  }
+
   if (!expectedPassword || password !== expectedPassword) {
     return res.status(401).json({ error: "Invalid Hospital Administrator credentials." });
   }
@@ -538,7 +572,8 @@ app.post("/api/admin/login", (req, res) => {
 });
 
 app.get("/api/admin/hospitals", (req, res) => {
-  const list = REGISTRY_HOSPITALS.map((h) => ({ id: h.id, name: h.name }));
+  const allHospitals = [...REGISTRY_HOSPITALS, ...REGISTERED_HOSPITALS];
+  const list = allHospitals.map((h) => ({ id: h.id, name: h.name }));
   res.json(list);
 });
 
@@ -574,30 +609,10 @@ app.post("/api/admin/register", (req, res) => {
     codeGeneratedAt: new Date(),
   };
 
-  REGISTRY_HOSPITALS.push(newHospital);
-  ADMIN_PASSWORDS[hospitalId] = password;
+  REGISTERED_HOSPITALS.push(newHospital);
+  REGISTERED_PASSWORDS[hospitalId] = password;
 
-  const registrationData = {
-    hospitalId,
-    hospitalName,
-    hospitalType: hospitalType || "",
-    registrationNumber,
-    email,
-    phone,
-    website,
-    country: country || "Nigeria",
-    state,
-    city,
-    address,
-    adminName,
-    adminPosition,
-    adminEmail,
-    adminPhone,
-    adminNIN,
-    ehrSystem: ehrSystem || "None",
-    customEHR: customEHR || "",
-    emergencyCode,
-  };
+  savePersistentData({ hospitals: REGISTERED_HOSPITALS, adminPasswords: REGISTERED_PASSWORDS });
 
   res.json({
     success: true,
@@ -651,7 +666,10 @@ app.post("/api/admin/doctors/toggle", (req, res) => {
 
 app.post("/api/admin/:hospitalId/emergency-code/rotate", (req, res) => {
   const { hospitalId } = req.params;
-  const hospital = REGISTRY_HOSPITALS.find((h) => h.id === hospitalId);
+  let hospital = REGISTRY_HOSPITALS.find((h) => h.id === hospitalId);
+  if (!hospital) {
+    hospital = REGISTERED_HOSPITALS.find((h) => h.id === hospitalId);
+  }
 
   if (!hospital) {
     return res.status(404).json({ error: "Hospital not found." });
@@ -662,6 +680,10 @@ app.post("/api/admin/:hospitalId/emergency-code/rotate", (req, res) => {
 
   hospital.emergencyOverrideCode = newCode;
   hospital.codeGeneratedAt = new Date();
+
+  if (REGISTERED_HOSPITALS.includes(hospital as any)) {
+    savePersistentData({ hospitals: REGISTERED_HOSPITALS, adminPasswords: REGISTERED_PASSWORDS });
+  }
 
   res.json({
     success: true,
@@ -680,7 +702,10 @@ app.get("/api/admin/:hospitalId/patients", (req, res) => {
 
 app.get("/api/admin/:hospitalId/logs", (req, res) => {
   const { hospitalId } = req.params;
-  const hospital = REGISTRY_HOSPITALS.find((h) => h.id === hospitalId);
+  let hospital = REGISTRY_HOSPITALS.find((h) => h.id === hospitalId);
+  if (!hospital) {
+    hospital = REGISTERED_HOSPITALS.find((h) => h.id === hospitalId);
+  }
   if (!hospital) {
     return res.status(404).json({ error: "Hospital not found." });
   }
