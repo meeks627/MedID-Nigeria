@@ -85,7 +85,8 @@ export default function DoctorPortal({ onBack }: DoctorPortalProps) {
       setDoctor(data.doctor);
       setIsLoggedIn(true);
     } catch (err) {
-      setError("Failed to authenticate at clinician directory.");
+      console.error("Doctor login error:", err);
+      setError("Failed to authenticate. Check server connection.");
     }
   };
 

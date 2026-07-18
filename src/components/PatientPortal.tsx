@@ -75,7 +75,8 @@ export default function PatientPortal({ onBack }: PatientPortalProps) {
       setAccessHistory(data.accessHistory);
       setViewMode("DASHBOARD");
     } catch (err) {
-      setError("Failed to connect to the authentication server.");
+      console.error("Login error:", err);
+      setError("Failed to connect to the server. Check that the API is reachable.");
     }
   };
 
@@ -164,7 +165,8 @@ export default function PatientPortal({ onBack }: PatientPortalProps) {
       setOtpSent(true);
       setSimulatedNotification(data.otpSimulatedNotification);
     } catch (err) {
-      setError("Failed to reach server.");
+      console.error("Recover error:", err);
+      setError("Failed to reach server. Check that the API is reachable.");
     }
   };
 
