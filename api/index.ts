@@ -1,17 +1,101 @@
 import express from "express";
 import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
+import bcrypt from "bcryptjs";
 import { GoogleGenAI } from "@google/genai";
-import {
-  initDb, saveDb, hashPassword, verifyPassword, hashPin, verifyPin,
-  setSeedAdminPassword, getAdminPassword, setAdminPassword,
-  getPatientPin, setPatientPin,
-  addHospital, findHospital, getHospitals, updateHospital,
-  addDoctor, findDoctor, findDoctorByEmail, getDoctorsByHospital, toggleDoctor,
-  addPatient, findPatient, findPatientByNIN, updatePatient, getPatientsByHospital,
-  addLog, getLogsByHospital,
-  getNextHospitalId, getNextDoctorId, getNextLogId, getNextMedID,
-  getDoctors, getPatients, getLogs,
-} from "./lib/db";
+
+// ─── Simple JSON File Database ───────────────────────────────────────────────
+const SALT_ROUNDS = 10;
+const IS_VERCEL = process.env.VERCEL === "1";
+const DB_PATH = IS_VERCEL ? "/tmp/medid-db.json" : path.join(process.cwd(), "medid-db.json");
+
+interface DbStore {
+  adminPasswords: Record<string, string>;
+  patientPins: Record<string, string>;
+  hospitals: any[];
+  doctors: any[];
+  patients: any[];
+  logs: any[];
+  counters: { hospitalId: number; doctorId: number; patientMedId: number; logId: number };
+}
+
+const defaultStore = (): DbStore => ({
+  adminPasswords: {},
+  patientPins: {},
+  hospitals: [],
+  doctors: [],
+  patients: [],
+  logs: [],
+  counters: { hospitalId: 1, doctorId: 1, patientMedId: 38281727, logId: 1 },
+});
+
+let store: DbStore = defaultStore();
+
+function loadDb(): void {
+  try {
+    if (fs.existsSync(DB_PATH)) {
+      store = { ...defaultStore(), ...JSON.parse(fs.readFileSync(DB_PATH, "utf-8")) };
+    }
+  } catch (e) { console.error("DB load:", e); }
+}
+function saveDb(): void {
+  try {
+    const dir = path.dirname(DB_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(DB_PATH, JSON.stringify(store), "utf-8");
+  } catch (e) { console.error("DB save:", e); }
+}
+
+// Password helpers
+const hashPw = (pw: string) => bcrypt.hashSync(pw, SALT_ROUNDS);
+const verifyPw = (pw: string, hash: string) => { try { return bcrypt.compareSync(pw, hash); } catch { return pw === hash; } };
+const hashPin = (pin: string) => bcrypt.hashSync(pin, SALT_ROUNDS);
+const verifyPin = (pin: string, hash: string) => { try { return bcrypt.compareSync(pin, hash); } catch { return pin === hash; } };
+
+// Admin passwords
+function setSeedAdminPw(id: string, pw: string) { if (!store.adminPasswords[id]) store.adminPasswords[id] = hashPw(pw); }
+function setAdminPw(id: string, pw: string) { store.adminPasswords[id] = hashPw(pw); saveDb(); }
+function getAdminPw(id: string) { return store.adminPasswords[id]; }
+
+// Patient PINs
+function setPatientPin(medID: string, pin: string) { store.patientPins[medID] = hashPin(pin); saveDb(); }
+function getPatientPin(medID: string) { return store.patientPins[medID]; }
+
+// Hospitals
+function getHospitals() { return store.hospitals; }
+function addHospital(h: any) { store.hospitals.push(h); saveDb(); }
+function findHospital(id: string) { return store.hospitals.find((h: any) => h.id === id); }
+function updateHospital(id: string, u: any) { const i = store.hospitals.findIndex((h: any) => h.id === id); if (i !== -1) { store.hospitals[i] = { ...store.hospitals[i], ...u }; saveDb(); } }
+
+// Doctors
+function getDoctors() { return store.doctors; }
+function addDoctor(d: any) { store.doctors.push(d); saveDb(); }
+function findDoctor(id: string) { return store.doctors.find((d: any) => d.id === id); }
+function findDoctorByEmail(email: string) { return store.doctors.find((d: any) => d.email?.toLowerCase() === email.toLowerCase()); }
+function getDoctorsByHospital(hid: string) { return store.doctors.filter((d: any) => d.hospitalId === hid); }
+function toggleDoctor(id: string) { const d = store.doctors.find((d: any) => d.id === id); if (d) { d.enabled = !d.enabled; saveDb(); } return d; }
+
+// Patients
+function getPatients() { return store.patients; }
+function addPatient(p: any) { store.patients.push(p); saveDb(); }
+function findPatient(medID: string) { return store.patients.find((p: any) => p.medID === medID); }
+function findPatientByNIN(nin: string) { return store.patients.find((p: any) => p.nin === nin); }
+function updatePatient(medID: string, u: any) { const i = store.patients.findIndex((p: any) => p.medID === medID); if (i !== -1) { store.patients[i] = { ...store.patients[i], ...u }; saveDb(); } }
+function getPatientsByHospital(hid: string) { return store.patients.filter((p: any) => p.linkedHospitals?.includes(hid)); }
+
+// Logs
+function getLogs() { return store.logs; }
+function addLog(l: any) { store.logs.push(l); saveDb(); }
+function getLogsByHospital(hid: string) { return store.logs.filter((l: any) => l.hospital?.includes(hid) || l.hospitalId === hid); }
+
+// ID generators
+function nextHospitalId(): string { const n = store.counters.hospitalId++; saveDb(); return `HSP${String(n).padStart(6, "0")}`; }
+function nextDoctorId(): string { const n = store.counters.doctorId++; saveDb(); return `DOC${n}`; }
+function nextLogId(): string { const n = store.counters.logId++; saveDb(); return `LOG${n}`; }
+function nextMedID(): string { const n = store.counters.patientMedId++; saveDb(); return `MD${n}`; }
+
+loadDb();
 
 dotenv.config();
 
@@ -395,15 +479,12 @@ const ADMIN_PASSWORDS: { [hospitalId: string]: string } = {
   Evercare: "ADMIN123",
 };
 
-// Initialize database — loads persisted data and merges with in-memory seed data
-initDb();
-
 // Sync seed hospitals into db with hashed passwords
 REGISTRY_HOSPITALS.forEach((h) => {
   if (!findHospital(h.id)) {
     addHospital(h);
   }
-  setSeedAdminPassword(h.id, ADMIN_PASSWORDS[h.id]);
+  setSeedAdminPw(h.id, ADMIN_PASSWORDS[h.id]);
 });
 
 // Sync seed doctors into db
@@ -470,7 +551,7 @@ app.post("/api/patient/register", (req, res) => {
     return res.status(400).json({ error: "A MedID profile is already linked to this NIN." });
   }
 
-  const medID = getNextMedID();
+  const medID = nextMedID();
 
   const newPatient: PatientProfile = {
     medID,
@@ -586,8 +667,8 @@ app.post("/api/admin/login", (req, res) => {
     return res.status(404).json({ error: "Hospital not registered on MedID platform." });
   }
 
-  const storedHash = getAdminPassword(hospitalId);
-  if (!storedHash || !verifyPassword(password, storedHash)) {
+  const storedHash = getAdminPw(hospitalId);
+  if (!storedHash || !verifyPw(password, storedHash)) {
     return res.status(401).json({ error: "Invalid Hospital Administrator credentials." });
   }
 
@@ -627,7 +708,7 @@ app.post("/api/admin/register", (req, res) => {
     return res.status(409).json({ error: "This hospital is already registered on MedID." });
   }
 
-  const hospitalId = getNextHospitalId();
+  const hospitalId = nextHospitalId();
 
   const randomDigits = Math.floor(1000 + Math.random() * 9000);
   const emergencyCode = `MDEM-${randomDigits}`;
@@ -649,7 +730,7 @@ app.post("/api/admin/register", (req, res) => {
   };
 
   addHospital(newHospital);
-  setAdminPassword(hospitalId, password);
+  setAdminPw(hospitalId, password);
 
   // Also sync to in-memory arrays for backward compat
   REGISTRY_HOSPITALS.push(newHospital);
@@ -676,7 +757,7 @@ app.post("/api/admin/:hospitalId/doctors/register", (req, res) => {
     return res.status(400).json({ error: "Missing required fields for doctor registration." });
   }
 
-  const id = getNextDoctorId();
+  const id = nextDoctorId();
   const newDoc: Doctor = {
     id,
     name,
@@ -815,7 +896,7 @@ app.post("/api/doctor/retrieve-records", (req, res) => {
   const dateStr = now.toLocaleDateString([], { day: "numeric", month: "long", year: "numeric" });
 
   const newLog: AccessLog = {
-    id: getNextLogId(),
+    id: nextLogId(),
     date: dateStr,
     time: timeStr,
     hospital: hospital ? hospital.name : doctor.hospitalId,
@@ -911,7 +992,7 @@ app.post("/api/doctor/emergency-retrieve", (req, res) => {
   const dateStr = now.toLocaleDateString([], { day: "numeric", month: "long", year: "numeric" });
 
   const emergencyLog: AccessLog = {
-    id: getNextLogId(),
+    id: nextLogId(),
     date: dateStr,
     time: timeStr,
     hospital: hospital.name,
