@@ -17,12 +17,11 @@ A National Healthcare Identity and Record Interoperability Platform for identity
    ```
 4. Visit **http://localhost:3000**
 
-## Deploy on Render
+## Deploy on Vercel
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+[![Deploy to Vercel](https://vercel.com/button)](https://vercel.com/new)
 
-1. Connect your GitHub repo
-2. Use **Web Service** type
-3. Build command: `npm run build`
-4. Start command: `node dist/server.cjs`
-5. Set `NODE_ENV=production` environment variable
+1. Connect your GitHub repo (`meeks627/MedID-Nigeria`)
+2. Vercel auto-detects the `vercel.json` config
+3. Set `GEMINI_API_KEY` as an environment variable (optional)
+4. Deploy
