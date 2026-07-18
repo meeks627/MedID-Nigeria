@@ -7,4 +7,6 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", message: "Express API is working" });
 });
 
-export default app;
+export default function handler(req: any, res: any) {
+  app(req, res);
+}
