@@ -509,6 +509,14 @@ AUDIT_LOGS.forEach((l) => {
   }
 });
 
+// Ensure counters are past seed data
+const maxDocNum = Math.max(...REGISTRY_DOCTORS.map((d) => parseInt(d.id.replace("DOC", "")) || 0));
+store.counters.doctorId = Math.max(store.counters.doctorId, maxDocNum + 1);
+store.counters.logId = Math.max(store.counters.logId, AUDIT_LOGS.length + 1);
+const maxMedNum = Math.max(...REGISTRY_PATIENTS.map((p) => parseInt(p.medID.replace("MD", "")) || 0));
+store.counters.patientMedId = Math.max(store.counters.patientMedId, maxMedNum + 1);
+saveDb();
+
 // Reload any data from disk that may have been persisted from previous sessions
 const persistedHospitals = getHospitals();
 persistedHospitals.forEach((h: any) => {
