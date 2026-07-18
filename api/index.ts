@@ -1,31 +1,19 @@
 import express from "express";
 import dotenv from "dotenv";
-import fs from "fs";
-import path from "path";
 import { GoogleGenAI } from "@google/genai";
+import {
+  initDb, saveDb, hashPassword, verifyPassword, hashPin, verifyPin,
+  setSeedAdminPassword, getAdminPassword, setAdminPassword,
+  getPatientPin, setPatientPin,
+  addHospital, findHospital, getHospitals, updateHospital,
+  addDoctor, findDoctor, findDoctorByEmail, getDoctorsByHospital, toggleDoctor,
+  addPatient, findPatient, findPatientByNIN, updatePatient, getPatientsByHospital,
+  addLog, getLogsByHospital,
+  getNextHospitalId, getNextDoctorId, getNextLogId, getNextMedID,
+  getDoctors, getPatients, getLogs,
+} from "./db";
 
 dotenv.config();
-
-const DATA_FILE = path.join("/tmp", "medid-data.json");
-
-function loadPersistentData(): { hospitals: any[]; adminPasswords: Record<string, string> } {
-  try {
-    if (fs.existsSync(DATA_FILE)) {
-      return JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
-    }
-  } catch (e) {
-    console.error("Failed to load persistent data:", e);
-  }
-  return { hospitals: [], adminPasswords: {} };
-}
-
-function savePersistentData(data: { hospitals: any[]; adminPasswords: Record<string, string> }) {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data), "utf-8");
-  } catch (e) {
-    console.error("Failed to save persistent data:", e);
-  }
-}
 
 export const app = express();
 app.use(express.json());
@@ -407,12 +395,64 @@ const ADMIN_PASSWORDS: { [hospitalId: string]: string } = {
   Evercare: "ADMIN123",
 };
 
-const persistentData = loadPersistentData();
-const REGISTERED_HOSPITALS: HospitalProfile[] = persistentData.hospitals;
-const REGISTERED_PASSWORDS: Record<string, string> = persistentData.adminPasswords;
+// Initialize database — loads persisted data and merges with in-memory seed data
+initDb();
 
-let hospitalIdCounter = REGISTERED_HOSPITALS.length + 1;
-let medIDCounter = 38281727;
+// Sync seed hospitals into db with hashed passwords
+REGISTRY_HOSPITALS.forEach((h) => {
+  if (!findHospital(h.id)) {
+    addHospital(h);
+  }
+  setSeedAdminPassword(h.id, ADMIN_PASSWORDS[h.id]);
+});
+
+// Sync seed doctors into db
+REGISTRY_DOCTORS.forEach((d) => {
+  if (!findDoctor(d.id)) {
+    addDoctor(d);
+  }
+});
+
+// Sync seed patients into db with hashed PINs
+REGISTRY_PATIENTS.forEach((p) => {
+  if (!findPatient(p.medID)) {
+    addPatient(p);
+  }
+  setPatientPin(p.medID, p.pin);
+});
+
+// Sync seed logs into db
+AUDIT_LOGS.forEach((l) => {
+  if (!getLogs().find((existing: any) => existing.id === l.id)) {
+    addLog(l);
+  }
+});
+
+// Reload any data from disk that may have been persisted from previous sessions
+const persistedHospitals = getHospitals();
+persistedHospitals.forEach((h: any) => {
+  if (!REGISTRY_HOSPITALS.find((rh) => rh.id === h.id) && !REGISTRY_HOSPITALS.find((rh) => rh.id === h.id)) {
+    REGISTRY_HOSPITALS.push(h);
+  }
+});
+const persistedPatients = getPatients();
+persistedPatients.forEach((p: any) => {
+  if (!REGISTRY_PATIENTS.find((rp) => rp.medID === p.medID)) {
+    REGISTRY_PATIENTS.push(p);
+  }
+});
+const persistedDoctors = getDoctors();
+persistedDoctors.forEach((d: any) => {
+  if (!REGISTRY_DOCTORS.find((rd) => rd.id === d.id)) {
+    REGISTRY_DOCTORS.push(d);
+  }
+});
+const persistedLogs = getLogs();
+persistedLogs.forEach((l: any) => {
+  if (!AUDIT_LOGS.find((rl) => rl.id === l.id)) {
+    AUDIT_LOGS.push(l);
+  }
+});
 
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
@@ -425,13 +465,12 @@ app.post("/api/patient/register", (req, res) => {
     return res.status(400).json({ error: "NIN (National Identity Number) is mandatory. Registration is strictly blocked without NIN." });
   }
 
-  const existingByNin = REGISTRY_PATIENTS.find((p) => p.nin === nin);
+  const existingByNin = findPatientByNIN(nin);
   if (existingByNin) {
     return res.status(400).json({ error: "A MedID profile is already linked to this NIN." });
   }
 
-  const uniqueDigits = String(medIDCounter++);
-  const medID = `MD${uniqueDigits}`;
+  const medID = getNextMedID();
 
   const newPatient: PatientProfile = {
     medID,
@@ -447,7 +486,8 @@ app.post("/api/patient/register", (req, res) => {
     linkedHospitals: [],
   };
 
-  REGISTRY_PATIENTS.push(newPatient);
+  addPatient(newPatient);
+  setPatientPin(medID, pin || "1234");
 
   res.json({
     success: true,
@@ -466,7 +506,7 @@ app.post("/api/patient/recover", (req, res) => {
     return res.status(400).json({ error: "NIN is mandatory to recover your MedID." });
   }
 
-  const patient = REGISTRY_PATIENTS.find((p) => p.nin === nin);
+  const patient = findPatientByNIN(nin);
   if (!patient) {
     return res.status(404).json({ error: "No MedID associated with this NIN. Please register." });
   }
@@ -483,13 +523,13 @@ app.post("/api/patient/recover", (req, res) => {
 
 app.post("/api/patient/login", (req, res) => {
   const { medID, pin } = req.body;
-  const patient = REGISTRY_PATIENTS.find((p) => p.medID === medID);
-
+  const patient = findPatient(medID);
   if (!patient) {
     return res.status(404).json({ error: "MedID not found." });
   }
 
-  if (patient.pin !== pin) {
+  const storedHash = getPatientPin(medID);
+  if (!storedHash || !verifyPin(pin, storedHash)) {
     return res.status(401).json({ error: "Invalid PIN." });
   }
 
@@ -512,7 +552,7 @@ app.post("/api/patient/login", (req, res) => {
 
 app.post("/api/doctor/login", (req, res) => {
   const { email, licenseNumber } = req.body;
-  const doctor = REGISTRY_DOCTORS.find((d) => d.email.toLowerCase() === email.toLowerCase());
+  const doctor = findDoctorByEmail(email);
 
   if (!doctor) {
     return res.status(404).json({ error: "Doctor credentials not found." });
@@ -522,7 +562,7 @@ app.post("/api/doctor/login", (req, res) => {
     return res.status(403).json({ error: "Your doctor account has been disabled by your hospital administrator." });
   }
 
-  const hospital = REGISTRY_HOSPITALS.find((h) => h.id === doctor.hospitalId);
+  const hospital = findHospital(doctor.hospitalId);
 
   res.json({
     success: true,
@@ -541,21 +581,13 @@ app.post("/api/doctor/login", (req, res) => {
 
 app.post("/api/admin/login", (req, res) => {
   const { hospitalId, password } = req.body;
-  let hospital = REGISTRY_HOSPITALS.find((h) => h.id === hospitalId);
-  if (!hospital) {
-    hospital = REGISTERED_HOSPITALS.find((h) => h.id === hospitalId);
-  }
-
+  const hospital = findHospital(hospitalId);
   if (!hospital) {
     return res.status(404).json({ error: "Hospital not registered on MedID platform." });
   }
 
-  let expectedPassword = ADMIN_PASSWORDS[hospitalId];
-  if (!expectedPassword) {
-    expectedPassword = REGISTERED_PASSWORDS[hospitalId];
-  }
-
-  if (!expectedPassword || password !== expectedPassword) {
+  const storedHash = getAdminPassword(hospitalId);
+  if (!storedHash || !verifyPassword(password, storedHash)) {
     return res.status(401).json({ error: "Invalid Hospital Administrator credentials." });
   }
 
@@ -572,8 +604,8 @@ app.post("/api/admin/login", (req, res) => {
 });
 
 app.get("/api/admin/hospitals", (req, res) => {
-  const allHospitals = [...REGISTRY_HOSPITALS, ...REGISTERED_HOSPITALS];
-  const list = allHospitals.map((h) => ({ id: h.id, name: h.name }));
+  const allHospitals = getHospitals();
+  const list = allHospitals.map((h: any) => ({ id: h.id, name: h.name }));
   res.json(list);
 });
 
@@ -590,29 +622,37 @@ app.post("/api/admin/register", (req, res) => {
     return res.status(400).json({ error: "Required fields missing." });
   }
 
-  const existingReg = REGISTRY_HOSPITALS.find((h) => h.name === hospitalName);
+  const existingReg = getHospitals().find((h: any) => h.name === hospitalName);
   if (existingReg) {
     return res.status(409).json({ error: "This hospital is already registered on MedID." });
   }
 
-  const idStr = String(hospitalIdCounter++).padStart(6, "0");
-  const hospitalId = `HSP${idStr}`;
+  const hospitalId = getNextHospitalId();
 
   const randomDigits = Math.floor(1000 + Math.random() * 9000);
   const emergencyCode = `MDEM-${randomDigits}`;
 
-  const newHospital: HospitalProfile = {
+  const fullAddress = `${address || ""}, ${city || ""}, ${state || ""}, ${country || "Nigeria"}`;
+  const newHospital: any = {
     id: hospitalId,
     name: hospitalName,
-    address: `${address || ""}, ${city || ""}, ${state || ""}, ${country || "Nigeria"}`,
+    address: fullAddress,
     emergencyOverrideCode: emergencyCode,
-    codeGeneratedAt: new Date(),
+    codeGeneratedAt: new Date().toISOString(),
+    hospitalType: hospitalType || "",
+    registrationNumber,
+    email, phone, website,
+    country: country || "Nigeria", state, city,
+    adminName, adminPosition, adminEmail, adminPhone, adminNIN,
+    ehrSystem: ehrSystem || "None",
+    customEHR: customEHR || "",
   };
 
-  REGISTERED_HOSPITALS.push(newHospital);
-  REGISTERED_PASSWORDS[hospitalId] = password;
+  addHospital(newHospital);
+  setAdminPassword(hospitalId, password);
 
-  savePersistentData({ hospitals: REGISTERED_HOSPITALS, adminPasswords: REGISTERED_PASSWORDS });
+  // Also sync to in-memory arrays for backward compat
+  REGISTRY_HOSPITALS.push(newHospital);
 
   res.json({
     success: true,
@@ -624,7 +664,7 @@ app.post("/api/admin/register", (req, res) => {
 
 app.get("/api/admin/:hospitalId/doctors", (req, res) => {
   const { hospitalId } = req.params;
-  const docs = REGISTRY_DOCTORS.filter((d) => d.hospitalId === hospitalId);
+  const docs = getDoctorsByHospital(hospitalId);
   res.json(docs);
 });
 
@@ -636,7 +676,7 @@ app.post("/api/admin/:hospitalId/doctors/register", (req, res) => {
     return res.status(400).json({ error: "Missing required fields for doctor registration." });
   }
 
-  const id = `DOC${REGISTRY_DOCTORS.length + 1}`;
+  const id = getNextDoctorId();
   const newDoc: Doctor = {
     id,
     name,
@@ -648,29 +688,25 @@ app.post("/api/admin/:hospitalId/doctors/register", (req, res) => {
     enabled: true,
   };
 
+  addDoctor(newDoc);
   REGISTRY_DOCTORS.push(newDoc);
   res.json({ success: true, doctor: newDoc });
 });
 
 app.post("/api/admin/doctors/toggle", (req, res) => {
   const { doctorId } = req.body;
-  const doc = REGISTRY_DOCTORS.find((d) => d.id === doctorId);
-
+  const doc = toggleDoctor(doctorId);
   if (!doc) {
     return res.status(404).json({ error: "Doctor not found." });
   }
-
-  doc.enabled = !doc.enabled;
+  const inMemDoc = REGISTRY_DOCTORS.find((d) => d.id === doctorId);
+  if (inMemDoc) inMemDoc.enabled = doc.enabled;
   res.json({ success: true, enabled: doc.enabled, doctor: doc });
 });
 
 app.post("/api/admin/:hospitalId/emergency-code/rotate", (req, res) => {
   const { hospitalId } = req.params;
-  let hospital = REGISTRY_HOSPITALS.find((h) => h.id === hospitalId);
-  if (!hospital) {
-    hospital = REGISTERED_HOSPITALS.find((h) => h.id === hospitalId);
-  }
-
+  const hospital = findHospital(hospitalId);
   if (!hospital) {
     return res.status(404).json({ error: "Hospital not found." });
   }
@@ -678,39 +714,47 @@ app.post("/api/admin/:hospitalId/emergency-code/rotate", (req, res) => {
   const randomDigits = Math.floor(1000 + Math.random() * 9000);
   const newCode = `${hospitalId.slice(0, 4).toUpperCase()}-${randomDigits}`;
 
-  hospital.emergencyOverrideCode = newCode;
-  hospital.codeGeneratedAt = new Date();
+  updateHospital(hospitalId, {
+    emergencyOverrideCode: newCode,
+    codeGeneratedAt: new Date().toISOString(),
+  });
 
-  if (REGISTERED_HOSPITALS.includes(hospital as any)) {
-    savePersistentData({ hospitals: REGISTERED_HOSPITALS, adminPasswords: REGISTERED_PASSWORDS });
+  const inMemHospital = REGISTRY_HOSPITALS.find((h: any) => h.id === hospitalId);
+  if (inMemHospital) {
+    inMemHospital.emergencyOverrideCode = newCode;
+    inMemHospital.codeGeneratedAt = new Date();
   }
 
   res.json({
     success: true,
     emergencyOverrideCode: newCode,
-    codeGeneratedAt: hospital.codeGeneratedAt,
+    codeGeneratedAt: new Date(),
   });
 });
 
 app.get("/api/admin/:hospitalId/patients", (req, res) => {
   const { hospitalId } = req.params;
-  const patients = REGISTRY_PATIENTS.filter((p) => {
+  const dbPatients = getPatientsByHospital(hospitalId);
+  const inMemPatients = REGISTRY_PATIENTS.filter((p) => {
     return p.linkedHospitals.includes(hospitalId) || (EHR_DATABASES[hospitalId]?.patients[p.medID] !== undefined);
   });
-  res.json(patients);
+  const merged = [...new Map([...dbPatients, ...inMemPatients].map((p: any) => [p.medID, p])).values()];
+  res.json(merged);
 });
 
 app.get("/api/admin/:hospitalId/logs", (req, res) => {
   const { hospitalId } = req.params;
-  let hospital = REGISTRY_HOSPITALS.find((h) => h.id === hospitalId);
-  if (!hospital) {
-    hospital = REGISTERED_HOSPITALS.find((h) => h.id === hospitalId);
-  }
+  const hospital = findHospital(hospitalId);
   if (!hospital) {
     return res.status(404).json({ error: "Hospital not found." });
   }
-  const logs = AUDIT_LOGS.filter((l) => l.hospital.includes(hospitalId) || l.hospital === hospital.name);
-  res.json(logs);
+  const logs = getLogsByHospital(hospitalId);
+  if (logs.length === 0) {
+    const inMemLogs = AUDIT_LOGS.filter((l) => l.hospital.includes(hospitalId) || l.hospital === hospital.name);
+    res.json(inMemLogs);
+  } else {
+    res.json(logs);
+  }
 });
 
 app.get("/api/doctor/search-patient", (req, res) => {
@@ -719,7 +763,7 @@ app.get("/api/doctor/search-patient", (req, res) => {
     return res.status(400).json({ error: "MedID is required." });
   }
 
-  const patient = REGISTRY_PATIENTS.find((p) => p.medID === medID.toString().trim());
+  const patient = findPatient(medID.toString().trim());
   if (!patient) {
     return res.status(404).json({ error: "Patient not found. Verify MedID formatting." });
   }
@@ -745,23 +789,23 @@ app.post("/api/doctor/retrieve-records", (req, res) => {
     return res.status(400).json({ error: "Missing required query parameters." });
   }
 
-  const patient = REGISTRY_PATIENTS.find((p) => p.medID === medID);
+  const patient = findPatient(medID);
   if (!patient) {
     return res.status(404).json({ error: "Patient not found." });
   }
 
-  const doctor = REGISTRY_DOCTORS.find((d) => d.id === doctorId);
+  const doctor = findDoctor(doctorId);
   if (!doctor) {
     return res.status(404).json({ error: "Doctor authentication invalid." });
   }
 
-  const hospital = REGISTRY_HOSPITALS.find((h) => h.id === doctor.hospitalId);
+  const hospital = findHospital(doctor.hospitalId);
 
   const retrievedRecords: { [hospitalName: string]: Encounter[] } = {};
   Object.keys(EHR_DATABASES).forEach((hospId) => {
     const hospRecord = EHR_DATABASES[hospId].patients[medID];
     if (hospRecord) {
-      const hospitalName = REGISTRY_HOSPITALS.find((h) => h.id === hospId)?.name || hospId;
+      const hospitalName = getHospitals().find((h: any) => h.id === hospId)?.name || hospId;
       retrievedRecords[hospitalName] = hospRecord.encounters;
     }
   });
@@ -771,7 +815,7 @@ app.post("/api/doctor/retrieve-records", (req, res) => {
   const dateStr = now.toLocaleDateString([], { day: "numeric", month: "long", year: "numeric" });
 
   const newLog: AccessLog = {
-    id: `LOG${AUDIT_LOGS.length + 1}`,
+    id: getNextLogId(),
     date: dateStr,
     time: timeStr,
     hospital: hospital ? hospital.name : doctor.hospitalId,
@@ -783,10 +827,12 @@ app.post("/api/doctor/retrieve-records", (req, res) => {
     duration: "10 minutes",
     status: "Completed",
   };
+  addLog(newLog);
   AUDIT_LOGS.push(newLog);
 
   if (hospital && !patient.linkedHospitals.includes(hospital.id)) {
     patient.linkedHospitals.push(hospital.id);
+    updatePatient(medID, { linkedHospitals: patient.linkedHospitals });
   }
 
   res.json({
@@ -804,11 +850,12 @@ app.post("/api/doctor/retrieve-records", (req, res) => {
 
 app.post("/api/doctor/emergency-biometric-match", (req, res) => {
   const { biometricType, scanData, reason, doctorId } = req.body;
-  let selectedPatient = REGISTRY_PATIENTS[0];
+  const allPatients = getPatients();
+  let selectedPatient = allPatients[0] || REGISTRY_PATIENTS[0];
   if (scanData === "fingerprint_david") {
-    selectedPatient = REGISTRY_PATIENTS[1];
+    selectedPatient = allPatients.find((p: any) => p.medID === "MD77441199") || REGISTRY_PATIENTS[1];
   } else if (scanData === "face_chioma") {
-    selectedPatient = REGISTRY_PATIENTS[2];
+    selectedPatient = allPatients.find((p: any) => p.medID === "MD44118822") || REGISTRY_PATIENTS[2];
   }
 
   res.json({
@@ -831,12 +878,12 @@ app.post("/api/doctor/emergency-retrieve", (req, res) => {
     return res.status(400).json({ error: "Missing emergency credentials or Patient MedID." });
   }
 
-  const doctor = REGISTRY_DOCTORS.find((d) => d.id === doctorId);
+  const doctor = findDoctor(doctorId);
   if (!doctor) {
     return res.status(404).json({ error: "Doctor credentials invalid." });
   }
 
-  const hospital = REGISTRY_HOSPITALS.find((h) => h.id === doctor.hospitalId);
+  const hospital = findHospital(doctor.hospitalId);
   if (!hospital) {
     return res.status(404).json({ error: "Hospital admin profile missing." });
   }
@@ -845,7 +892,7 @@ app.post("/api/doctor/emergency-retrieve", (req, res) => {
     return res.status(401).json({ error: "Invalid Hospital Emergency Override Code. Please consult your Hospital Admin." });
   }
 
-  const patient = REGISTRY_PATIENTS.find((p) => p.medID === medID);
+  const patient = findPatient(medID);
   if (!patient) {
     return res.status(404).json({ error: "Patient MedID invalid." });
   }
@@ -854,7 +901,7 @@ app.post("/api/doctor/emergency-retrieve", (req, res) => {
   Object.keys(EHR_DATABASES).forEach((hospId) => {
     const hospRecord = EHR_DATABASES[hospId].patients[medID];
     if (hospRecord) {
-      const hospitalName = REGISTRY_HOSPITALS.find((h) => h.id === hospId)?.name || hospId;
+      const hospitalName = getHospitals().find((h: any) => h.id === hospId)?.name || hospId;
       retrievedRecords[hospitalName] = hospRecord.encounters;
     }
   });
@@ -864,7 +911,7 @@ app.post("/api/doctor/emergency-retrieve", (req, res) => {
   const dateStr = now.toLocaleDateString([], { day: "numeric", month: "long", year: "numeric" });
 
   const emergencyLog: AccessLog = {
-    id: `LOG${AUDIT_LOGS.length + 1}`,
+    id: getNextLogId(),
     date: dateStr,
     time: timeStr,
     hospital: hospital.name,
@@ -876,6 +923,7 @@ app.post("/api/doctor/emergency-retrieve", (req, res) => {
     duration: "15 minutes",
     status: "Completed",
   };
+  addLog(emergencyLog);
   AUDIT_LOGS.push(emergencyLog);
 
   res.json({
