@@ -1,0 +1,6 @@
+{
+  "name": "MedID V4",
+  "description": "National Healthcare Identity and Record Access Platform for identity verification, record discovery, and AI clinical briefings.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
