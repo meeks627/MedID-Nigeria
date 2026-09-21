@@ -7,6 +7,10 @@
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 }
 
+html {
+  font-size: 17.5px; /* Increased base font size across the application for enhanced readability */
+}
+
 /* Custom fade animations */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(10px); }

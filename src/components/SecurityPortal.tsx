@@ -373,23 +373,23 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
                           ? "bg-rose-600 text-white"
                           : "bg-emerald-100 text-emerald-800"
                       }`}>
-                        {verification?.tamperDetected ? "Tamper Detected &bull; Verification Failed" : "100% Cryptographically Verified"}
+                        {verification?.tamperDetected ? "Integrity Alert &bull; Verification Failed" : "100% Clinically Verified"}
                       </span>
                       <span className="text-xs text-slate-400 font-mono">
-                        Algorithm: SHA-256 Chaining
+                        Protocol: Secure Medical Ledger Chaining
                       </span>
                     </div>
 
                     <h2 className="text-2xl font-black text-slate-900 mt-2">
                       {verification?.tamperDetected
-                        ? "Cryptographic Hash Digest Mismatch Detected"
-                        : "Immutable Longitudinal Audit Ledger"}
+                        ? "Medical Ledger Provenance Mismatch Detected"
+                        : "Immutable Longitudinal Clinical Audit Ledger"}
                     </h2>
 
                     <p className="text-sm text-slate-600 mt-1 max-w-3xl leading-relaxed">
                       {verification?.tamperDetected
                         ? verification.failureReason
-                        : `Every access attempt across all hospitals is cryptographically signed and hash-chained to the genesis anchor. Tampering with any historical record immediately invalidates all subsequent block digests.`}
+                        : `Every clinical access attempt across all hospitals is securely signed and chronologically chained to the genesis anchor. Altering any historical clinical record immediately invalidates subsequent provenance checksums.`}
                     </p>
                   </div>
                 </div>
@@ -402,17 +402,17 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
                     className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl flex items-center gap-2 transition-all"
                   >
                     <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-                    <span>Verify Audit Chain</span>
+                    <span>Verify Clinical Audit Trail</span>
                   </button>
 
                   {!verification?.tamperDetected ? (
                     <button
                       onClick={handleInjectTamper}
                       className="px-4 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl flex items-center gap-2 transition-all shadow-md"
-                      title="Simulates insider adversarial tampering with an audit block"
+                      title="Simulates unauthorized alteration of a clinical audit record"
                     >
                       <AlertTriangle className="w-4 h-4" />
-                      <span>Simulate Database Tamper Test</span>
+                      <span>Simulate Clinical Record Integrity Test</span>
                     </button>
                   ) : (
                     <button
@@ -420,7 +420,7 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
                       className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl flex items-center gap-2 transition-all shadow-md"
                     >
                       <CheckCircle2 className="w-4 h-4" />
-                      <span>Restore Pristine Audit Chain</span>
+                      <span>Restore Secure Clinical Audit Trail</span>
                     </button>
                   )}
                 </div>
