@@ -65,6 +65,70 @@ export function loadAuditChain(): void {
 
   if (auditChain.length === 0) {
     initGenesisAudit();
+    if (IS_VERCEL) {
+      const seedEvents = [
+        {
+          eventType: "STAFF_AUTHENTICATION_SUCCESS",
+          actorId: "DOC1",
+          actorName: "Dr. James Bello",
+          actorRole: "DOCTOR" as StaffRole,
+          hospitalId: "LUTH",
+          action: "STAFF_LOGIN",
+          resource: "AUTH_SERVICE",
+          decision: "ALLOW" as const,
+          purpose: "Staff login session established",
+        },
+        {
+          eventType: "CLINICAL_RECORDS_RETRIEVED",
+          actorId: "DOC1",
+          actorName: "Dr. James Bello",
+          actorRole: "DOCTOR" as StaffRole,
+          hospitalId: "LUTH",
+          patientMedID: "MD38281726",
+          action: "RETRIEVE_RECORDS",
+          resource: "CLINICAL_EHR_CHART",
+          decision: "ALLOW" as const,
+          accessScope: ["IDENTITY_ADMIN", "EMERGENCY_CRITICAL", "ROUTINE_CLINICAL"] as RecordSection[],
+          purpose: "Routine Cardiology Review",
+        },
+        {
+          eventType: "UNAUTHORIZED_RECORD_ACCESS_DENIED",
+          actorId: "CLERK1",
+          actorName: "Ibrahim Musa",
+          actorRole: "RECORDS_CLERK" as StaffRole,
+          hospitalId: "LUTH",
+          patientMedID: "MD38281726",
+          action: "RETRIEVE_RECORDS",
+          resource: "CLINICAL_EHR_CHART",
+          decision: "DENY" as const,
+          purpose: "Unauthorized Clinical Chart Access Attempt by Records Clerk",
+        },
+      ];
+      for (const s of seedEvents) {
+        const previousEvent = auditChain[auditChain.length - 1];
+        const previousHash = previousEvent ? previousEvent.currentHash : GENESIS_HASH;
+        const eventId = `AUDIT-${String(auditChain.length).padStart(6, "0")}`;
+        const payload: Omit<AuditEvent, "currentHash"> = {
+          id: eventId,
+          timestamp: new Date(Date.now() - (auditChain.length * 3600000)).toISOString(),
+          eventType: s.eventType,
+          actorId: s.actorId,
+          actorName: s.actorName,
+          actorRole: s.actorRole,
+          hospitalId: s.hospitalId,
+          patientMedID: s.patientMedID,
+          action: s.action,
+          resource: s.resource,
+          decision: s.decision,
+          accessScope: s.accessScope,
+          purpose: s.purpose,
+          previousHash,
+        };
+        const cHash = computeEventHash(payload);
+        auditChain.push({ ...payload, currentHash: cHash });
+      }
+      saveAuditChain();
+    }
   }
 }
 
@@ -92,7 +156,7 @@ function initGenesisAudit(): void {
     resource: "AUDIT_CHAIN_ROOT",
     decision: "ALLOW",
     accessScope: ["IDENTITY_ADMIN"],
-    purpose: "Genesis anchor for cryptographic hash chain",
+    purpose: "Genesis anchor for secure medical audit chain",
     previousHash: GENESIS_HASH,
   };
 
