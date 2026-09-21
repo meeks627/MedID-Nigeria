@@ -5,7 +5,7 @@ import {
   AlertTriangle, Fingerprint, Sparkles, Send, Brain, 
   RefreshCw, Activity, Scan, UserCheck, ShieldAlert, Key,
   Unlock, Clock, Eye, Pill, Microscope, Stethoscope,
-  ClipboardList, ShieldCheck, X, Building2, Phone, Calendar
+  ClipboardList, ShieldCheck, X, Building2, Phone, Calendar, LogOut
 } from "lucide-react";
 import { Doctor, Encounter, StaffRole, DutyStatus } from "../types";
 
@@ -103,15 +103,45 @@ const ROLE_ACCOUNTS = [
 
 export default function DoctorPortal({ onBack }: DoctorPortalProps) {
   // Session & Authentication
-  const [isLoggedIn, setIsLoggedIn] = useState(true);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [selectedRoleIndex, setSelectedRoleIndex] = useState(0);
-  const [email, setEmail] = useState("james.bello@luth.org");
-  const [licenseNumber, setLicenseNumber] = useState("MDN-2015-8831");
+  const [email, setEmail] = useState("");
+  const [licenseNumber, setLicenseNumber] = useState("");
   const [sessionToken, setSessionToken] = useState("");
   const [dutyStatus, setDutyStatus] = useState<DutyStatus>("ON_DUTY");
   const [dutyToggling, setDutyToggling] = useState(false);
   const [error, setError] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
+
+  const handleStaffLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    if (!email.trim()) {
+      setError("Please enter your staff email.");
+      return;
+    }
+    try {
+      const res = await fetch("/api/auth/staff-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Invalid credentials.");
+        return;
+      }
+      setSessionToken(data.sessionToken);
+      setDutyStatus(data.user?.dutyStatus || "ON_DUTY");
+      const foundIdx = ROLE_ACCOUNTS.findIndex(r => r.email.toLowerCase() === email.trim().toLowerCase());
+      if (foundIdx !== -1) {
+        setSelectedRoleIndex(foundIdx);
+      }
+      setIsLoggedIn(true);
+    } catch (err) {
+      setError("Failed to connect to authentication server.");
+    }
+  };
 
   // Workstation Lock (Shared terminal security)
   const [isStationLocked, setIsStationLocked] = useState(false);
@@ -510,6 +540,87 @@ export default function DoctorPortal({ onBack }: DoctorPortalProps) {
     return sections;
   };
 
+  if (!isLoggedIn) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8 font-sans">
+        <div className="sm:mx-auto sm:w-full sm:max-w-md">
+          <div className="flex justify-center">
+            <div className="bg-teal-600 text-white p-3 rounded-2xl shadow-sm">
+              <Stethoscope className="w-8 h-8" />
+            </div>
+          </div>
+          <h2 className="mt-6 text-center text-2xl font-black tracking-tight text-slate-900">
+            Clinician & Staff Portal Sign In
+          </h2>
+          <p className="mt-2 text-center text-xs text-slate-600">
+            Enter your official healthcare staff email and credentials to access the secure MedID exchange.
+          </p>
+        </div>
+
+        <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
+          <div className="bg-white py-8 px-4 shadow-sm border border-slate-200 sm:rounded-2xl sm:px-10">
+            <form onSubmit={handleStaffLogin} className="space-y-6">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Staff Email</label>
+                <div className="relative">
+                  <Mail className="w-5 h-5 text-slate-400 absolute left-3 top-3" />
+                  <input
+                    type="email"
+                    required
+                    placeholder="e.g. james.bello@luth.org"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="pl-10 w-full rounded-xl border border-slate-300 py-2.5 px-3.5 text-sm focus:border-teal-500 focus:ring-1 focus:ring-teal-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">License Number / Credential</label>
+                <div className="relative">
+                  <Lock className="w-5 h-5 text-slate-400 absolute left-3 top-3" />
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. MDN-2015-8831"
+                    value={licenseNumber}
+                    onChange={(e) => setLicenseNumber(e.target.value)}
+                    className="pl-10 w-full rounded-xl border border-slate-300 py-2.5 px-3.5 text-sm focus:border-teal-500 focus:ring-1 focus:ring-teal-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {error && (
+                <div className="bg-rose-50 border border-rose-200 text-rose-800 p-3 rounded-xl text-xs font-semibold">
+                  {error}
+                </div>
+              )}
+
+              <div>
+                <button
+                  type="submit"
+                  className="w-full flex justify-center py-3 px-4 border border-transparent rounded-xl shadow-sm text-sm font-bold text-white bg-teal-600 hover:bg-teal-700 focus:outline-none"
+                >
+                  Sign In to Console
+                </button>
+              </div>
+            </form>
+
+            <div className="mt-6 pt-6 border-t border-slate-200 text-center">
+              <button
+                onClick={onBack}
+                className="text-xs font-bold text-slate-600 hover:text-slate-900 flex items-center justify-center gap-1.5 mx-auto"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Return to Home Launcher</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#F8FAFC] flex flex-col justify-between font-sans text-slate-900" id="doctor-portal-root">
       
@@ -885,6 +996,16 @@ export default function DoctorPortal({ onBack }: DoctorPortalProps) {
             >
               <Lock className="w-3.5 h-3.5" />
               <span>Lock Terminal</span>
+            </button>
+
+            {/* Sign Out */}
+            <button
+              onClick={() => { setIsLoggedIn(false); setSessionToken(""); }}
+              className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5"
+              title="Sign Out"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Sign Out</span>
             </button>
           </div>
         </div>
