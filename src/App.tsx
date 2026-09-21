@@ -105,7 +105,7 @@ export default function App() {
       </div>
 
       {/* Global High-Contrast Downtime Warning Banner */}
-      {downtime?.isOutageActive && (
+      {downtime?.isOutageActive && currentPortal !== "SECURITY" && (
         <div className="bg-amber-500 text-slate-950 px-6 py-2 shadow-md flex items-center justify-between text-xs font-bold animate-pulse sticky top-8 z-40">
           <div className="max-w-7xl mx-auto w-full flex items-center justify-between">
             <div className="flex items-center gap-2">

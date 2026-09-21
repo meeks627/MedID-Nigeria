@@ -118,7 +118,7 @@ export default function PortalLauncher({ onSelectPortal }: PortalLauncherProps) 
               </div>
               <h3 className="font-display text-lg font-bold text-slate-800 mb-2">Security & Compliance</h3>
               <p className="text-slate-500 text-xs leading-relaxed mb-6">
-                Cryptographic SHA-256 audit chain verification, live abuse alert review, 365-day retention enforcement, and downtime resilience.
+                Cryptographic SHA-256 audit chain verification, live abuse alert review, and 365-day retention enforcement.
               </p>
             </div>
             <div className="flex items-center justify-between text-teal-600 font-bold text-xs pt-4 border-t border-slate-100 uppercase tracking-wider">

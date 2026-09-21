@@ -8,13 +8,10 @@ import {
   ArrowLeft,
   Lock,
   FileText,
-  Activity,
   CheckCircle2,
   XCircle,
   Eye,
   Server,
-  WifiOff,
-  Wifi,
   Database,
   Search,
   ExternalLink,
@@ -26,14 +23,14 @@ import {
   Building2,
   UserCheck
 } from "lucide-react";
-import { AuditVerification, SecurityAlert, DowntimeState } from "../types";
+import { AuditVerification, SecurityAlert } from "../types";
 
 interface SecurityPortalProps {
   onBack: () => void;
 }
 
 export default function SecurityPortal({ onBack }: SecurityPortalProps) {
-  const [activeTab, setActiveTab] = useState<"INTEGRITY" | "ALERTS" | "DOWNTIME" | "ADAPTERS">("INTEGRITY");
+  const [activeTab, setActiveTab] = useState<"INTEGRITY" | "ALERTS">("INTEGRITY");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -49,11 +46,6 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
   const [reviewNotes, setReviewNotes] = useState("");
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
 
-  // Downtime state
-  const [downtime, setDowntime] = useState<DowntimeState | null>(null);
-  const [downtimeToggling, setDowntimeToggling] = useState(false);
-  const [reconciling, setReconciling] = useState(false);
-
   // Filter logs search
   const [logSearchQuery, setLogSearchQuery] = useState("");
 
@@ -61,7 +53,6 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
   useEffect(() => {
     fetchAuditStatus();
     fetchAlerts();
-    fetchDowntimeStatus();
   }, []);
 
   const fetchAuditStatus = async () => {
@@ -91,16 +82,6 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
       setAlerts(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("Alerts fetch error:", err);
-    }
-  };
-
-  const fetchDowntimeStatus = async () => {
-    try {
-      const res = await fetch("/api/downtime/status");
-      const data = await res.json();
-      setDowntime(data);
-    } catch (err) {
-      console.error("Downtime fetch error:", err);
     }
   };
 
@@ -166,51 +147,6 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
       setError("Error submitting incident adjudication.");
     } finally {
       setReviewSubmitting(false);
-    }
-  };
-
-  const handleToggleDowntime = async () => {
-    setDowntimeToggling(true);
-    setError("");
-    try {
-      const targetState = !downtime?.isOutageActive;
-      const res = await fetch("/api/downtime/toggle", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ isOutageActive: targetState }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setDowntime(data);
-        setSuccess(`Downtime simulation mode ${targetState ? "ACTIVATED" : "DEACTIVATED"}.`);
-        fetchAuditStatus();
-      } else {
-        setError(data.error || "Failed to toggle outage state.");
-      }
-    } catch (err) {
-      setError("Network failure toggling downtime mode.");
-    } finally {
-      setDowntimeToggling(false);
-    }
-  };
-
-  const handleReconcileOffline = async () => {
-    setReconciling(true);
-    setError("");
-    try {
-      const res = await fetch("/api/downtime/reconcile", { method: "POST" });
-      const data = await res.json();
-      if (res.ok) {
-        setSuccess(`Reconciliation complete. ${data.reconciledCount} offline events committed to cryptographic chain.`);
-        fetchDowntimeStatus();
-        fetchAuditStatus();
-      } else {
-        setError(data.error || "Failed to reconcile offline queue.");
-      }
-    } catch (err) {
-      setError("Network failure during offline reconciliation.");
-    } finally {
-      setReconciling(false);
     }
   };
 
@@ -331,18 +267,6 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
           >
             <ShieldAlert className="w-4 h-4 text-rose-500" />
             <span>Security Incidents ({alerts.filter(a => a.status === "PENDING_REVIEW").length} Actionable)</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab("DOWNTIME")}
-            className={`px-6 py-3 text-sm font-bold border-b-2 flex items-center gap-2 transition-all ${
-              activeTab === "DOWNTIME"
-                ? "border-teal-600 text-teal-700 font-black"
-                : "border-transparent text-slate-500 hover:text-slate-900"
-            }`}
-          >
-            <WifiOff className="w-4 h-4" />
-            <span>Downtime Resilience</span>
           </button>
         </div>
 
@@ -731,100 +655,6 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
               </div>
             )}
 
-          </div>
-        )}
-
-        {/* ─── TAB 3: DOWNTIME RESILIENCE & OFFLINE BUFFERING ─── */}
-        {activeTab === "DOWNTIME" && (
-          <div className="space-y-6 animate-fade-in">
-            <div className="bg-white border border-slate-200 rounded-3xl p-8 shadow-sm space-y-6">
-              <div className="flex flex-col md:flex-row justify-between md:items-center gap-4 border-b border-slate-100 pb-5">
-                <div>
-                  <h3 className="text-xl font-black text-slate-900 flex items-center gap-2">
-                    <WifiOff className="w-6 h-6 text-amber-600" />
-                    <span>Downtime Resilience & Offline Cryptographic Buffer</span>
-                  </h3>
-                  <p className="text-sm text-slate-500 mt-1">
-                    Guarantees healthcare continuity during Nigerian power grid and telecommunication fiber blackouts.
-                  </p>
-                </div>
-
-                <button
-                  onClick={handleToggleDowntime}
-                  disabled={downtimeToggling}
-                  className={`px-5 py-2.5 rounded-xl font-bold text-xs transition-all shadow-sm flex items-center gap-2 ${
-                    downtime?.isOutageActive
-                      ? "bg-emerald-600 hover:bg-emerald-700 text-white"
-                      : "bg-amber-600 hover:bg-amber-700 text-white"
-                  }`}
-                >
-                  <RefreshCw className={`w-4 h-4 ${downtimeToggling ? "animate-spin" : ""}`} />
-                  <span>{downtime?.isOutageActive ? "Simulate Grid Restoration" : "Simulate National Grid Outage"}</span>
-                </button>
-              </div>
-
-              {/* Outage State Notice */}
-              <div className={`p-5 rounded-2xl border text-sm leading-relaxed ${
-                downtime?.isOutageActive
-                  ? "bg-amber-50 border-amber-300 text-amber-950"
-                  : "bg-slate-50 border-slate-200 text-slate-700"
-              }`}>
-                <div className="flex items-center gap-2 font-bold mb-1">
-                  <Activity className="w-4 h-4 text-amber-600" />
-                  <span>Current Network Architecture Status: {downtime?.isOutageActive ? "OFFLINE BLACKOUT MODE" : "ONLINE CONNECTED"}</span>
-                </div>
-                <p>
-                  When Nigerian clinics lose internet connectivity, emergency clinicians can still retrieve offline-cached emergency cards (blood type, severe drug allergies). Any break-glass action taken is buffered in a bounded local queue with local cryptographic SHA-256 signatures, ready for reconciliation.
-                </p>
-              </div>
-
-              {/* Status Indicators Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="bg-slate-50 border border-slate-200 p-4 rounded-2xl">
-                  <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block">Central Health Exchange</span>
-                  <span className={`text-base font-black mt-1 block ${
-                    downtime?.isOutageActive ? "text-amber-700" : "text-emerald-700"
-                  }`}>
-                    {downtime?.isOutageActive ? "DEGRADED (OFFLINE BUFFER)" : "ONLINE (CONNECTED)"}
-                  </span>
-                </div>
-
-                <div className="bg-slate-50 border border-slate-200 p-4 rounded-2xl">
-                  <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block">Hospital EHR Adapters</span>
-                  <span className={`text-base font-black mt-1 block ${
-                    downtime?.isOutageActive ? "text-rose-700" : "text-emerald-700"
-                  }`}>
-                    {downtime?.isOutageActive ? "SERVICE UNAVAILABLE (503)" : "ONLINE (ACTIVE)"}
-                  </span>
-                </div>
-
-                <div className="bg-slate-50 border border-slate-200 p-4 rounded-2xl">
-                  <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block">Buffered Offline Events</span>
-                  <span className="text-base font-black text-slate-900 mt-1 block font-mono">
-                    {downtime?.queuedEventsCount || 0} Events Buffered
-                  </span>
-                </div>
-              </div>
-
-              {/* Reconciliation Controls */}
-              {downtime?.queuedEventsCount ? (
-                <div className="bg-teal-50 border border-teal-200 rounded-2xl p-5 flex flex-col sm:flex-row justify-between sm:items-center gap-4">
-                  <div>
-                    <strong className="text-sm font-bold text-teal-950 block">Pending Offline Actions Awaiting Ledger Reconciliation</strong>
-                    <span className="text-xs text-teal-700">
-                      {downtime.queuedEventsCount} emergency events buffered locally with cryptographic timestamps.
-                    </span>
-                  </div>
-                  <button
-                    onClick={handleReconcileOffline}
-                    disabled={reconciling}
-                    className="px-5 py-2.5 bg-teal-700 hover:bg-teal-800 text-white rounded-xl font-bold text-xs transition-all shadow-sm shrink-0"
-                  >
-                    {reconciling ? "Reconciling..." : "Reconcile into National Ledger"}
-                  </button>
-                </div>
-              ) : null}
-            </div>
           </div>
         )}
 
