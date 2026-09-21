@@ -8,7 +8,7 @@
 }
 
 html {
-  font-size: 20.5px; /* Increased base font size across the application for enhanced readability (+3px) */
+  font-size: 20.5px; /* Base font size increased by 3px for enhanced readability */
 }
 
 /* Custom fade animations */
