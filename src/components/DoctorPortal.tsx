@@ -133,10 +133,7 @@ export default function DoctorPortal({ onBack }: DoctorPortalProps) {
       }
       setSessionToken(data.sessionToken);
       setDutyStatus(data.user?.dutyStatus || "ON_DUTY");
-      const foundIdx = ROLE_ACCOUNTS.findIndex(r => r.email.toLowerCase() === email.trim().toLowerCase());
-      if (foundIdx !== -1) {
-        setSelectedRoleIndex(foundIdx);
-      }
+      setActiveStaffUser(data.user);
       setIsLoggedIn(true);
     } catch (err) {
       setError("Failed to connect to authentication server.");
@@ -188,8 +185,9 @@ export default function DoctorPortal({ onBack }: DoctorPortalProps) {
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
 
+  const [activeStaffUser, setActiveStaffUser] = useState<any>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const activeUser = ROLE_ACCOUNTS[selectedRoleIndex];
+  const activeUser = activeStaffUser || ROLE_ACCOUNTS[0];
 
   // Quick Clinical Questions
   const quickQuestions = [
@@ -1010,36 +1008,6 @@ export default function DoctorPortal({ onBack }: DoctorPortalProps) {
           </div>
         </div>
       </header>
-
-      {/* ─── Role Switcher Bar (All 6 Roles from Specification) ─── */}
-      <section className="bg-slate-100 border-b border-slate-200 py-2.5 px-6">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Users className="w-4 h-4 text-slate-600 shrink-0" />
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-600">Simulate Staff Role:</span>
-          </div>
-
-          <div className="flex flex-wrap gap-1.5">
-            {ROLE_ACCOUNTS.map((roleAcc, idx) => {
-              const IconComp = roleAcc.icon;
-              return (
-                <button
-                  key={roleAcc.role}
-                  onClick={() => authenticateRole(idx)}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all ${
-                    selectedRoleIndex === idx
-                      ? "bg-teal-600 text-white shadow-sm"
-                      : "bg-white hover:bg-slate-200 text-slate-700 border border-slate-200"
-                  }`}
-                >
-                  <IconComp className="w-3.5 h-3.5" />
-                  <span>{roleAcc.title}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </section>
 
       {/* ─── Role Scope Banner ─── */}
       <div className="max-w-7xl mx-auto w-full px-6 pt-4">
