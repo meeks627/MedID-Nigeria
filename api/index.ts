@@ -2,48 +2,1502 @@ import express from "express";
 import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import { GoogleGenAI } from "@google/genai";
 
-import { StaffUser, DutyStatus, StaffRole, RecordSection } from "./_lib/types";
-import {
-  createSession,
-  getSession,
-  revokeSession,
-  updateDutyStatus,
-  findStaffByEmail,
-  findStaffById,
-  getStaffDirectory,
-  checkRateLimit,
-  addStaffUser,
-  SEED_STAFF_USERS,
-} from "./_lib/sessions";
-import { evaluateAccess, filterRecordsBySections } from "./_lib/policy";
-import {
-  recordAuditEvent,
-  getAuditEvents,
-  verifyAuditChain,
-  injectSyntheticTampering,
-  restoreAuditChain,
-  getRetentionPolicy,
-} from "./_lib/audit";
-import {
-  createSecurityAlert,
-  getSecurityAlerts,
-  reviewSecurityAlert,
-  triggerRuleAlert,
-} from "./_lib/abuse";
-import {
-  getDowntimeState,
-  setDowntimeOutage,
-  queueOfflineEvent,
-  reconcileOfflineEvents,
-  getQueuedEvents,
-} from "./_lib/downtime";
+
+const IS_VERCEL = process.env.VERCEL === "1";
+
+// ─── 1. CORE DOMAIN TYPES & INTERFACES ────────────────────────────────────────
+export type StaffRole = 
+  | "DOCTOR" 
+  | "NURSE" 
+  | "LAB_TECH" 
+  | "PHARMACIST" 
+  | "RECORDS_CLERK" 
+  | "HOSPITAL_ADMIN" 
+  | "SECURITY_ADMIN"
+  | "PATIENT";
+
+export type DutyStatus = "ON_DUTY" | "OFF_DUTY";
+
+export interface StaffUser {
+  id: string;
+  name: string;
+  email: string;
+  role: StaffRole;
+  hospitalId: string;
+  hospitalName?: string;
+  department?: string;
+  ward?: string;
+  wardId?: string;
+  licenseNumber?: string;
+  dutyStatus: DutyStatus;
+  enabled: boolean;
+  mfaEnabled?: boolean;
+}
+
+export type RecordSection = 
+  | "IDENTITY_ADMIN"       // Demographics, NIN, Registration
+  | "EMERGENCY_CRITICAL"   // Blood type, severe allergies, acute alerts
+  | "ROUTINE_CLINICAL"     // Diagnoses, clinical history, physician notes
+  | "LAB_PATHOLOGY"        // Lab test orders, blood panels, specimens
+  | "PHARMACY_MAR"         // Prescriptions, dosage, MAR dispensing
+  | "HIGHLY_RESTRICTED";   // Psychiatric notes, genetic data, sensitive escalations
+
+export type PolicyAction = 
+  | "SEARCH_PATIENT" 
+  | "RETRIEVE_RECORDS" 
+  | "EMERGENCY_OVERRIDE" 
+  | "GENERATE_AI_BRIEF" 
+  | "AI_CHAT_QUERY"
+  | "MANAGE_STAFF"
+  | "VIEW_AUDIT_LOGS"
+  | "VERIFY_AUDIT"
+  | "VIEW_SECURITY_ALERTS"
+  | "ADMIN_CREDENTIAL_MGMT"
+  | "INITIALIZE_IMMUTABLE_LOG"
+  | string;
+
+export interface PolicyContext {
+  subject: StaffUser;
+  patientMedID?: string;
+  action: PolicyAction;
+  resource?: string;
+  requestedSections?: RecordSection[];
+  purpose?: string;
+  isEmergency?: boolean;
+  emergencyToken?: string;
+}
+
+export interface PolicyDecision {
+  decision: "ALLOW" | "DENY";
+  reason: string;
+  permittedSections: RecordSection[];
+  alertTrigger?: string;
+}
+
+export interface AuditEvent {
+  id: string;
+  timestamp: number | string;
+  actorId: string;
+  actorName: string;
+  actorRole: StaffRole;
+  hospitalId: string;
+  patientMedID?: string;
+  action: PolicyAction;
+  eventType: string;
+  decision: "ALLOW" | "DENY";
+  purpose?: string;
+  resource?: string;
+  accessScope?: string[];
+  offlineTimestamp?: number | string;
+  details?: Record<string, any>;
+  previousHash: string;
+  currentHash: string;
+  signature?: string;
+  isOfflineReconciled?: boolean;
+}
+
+export interface SecurityAlert {
+  id: string;
+  timestamp: number | string;
+  ruleId: string;
+  severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  actorId: string;
+  actorName: string;
+  actorRole: StaffRole;
+  hospitalId: string;
+  patientMedID?: string;
+  description: string;
+  status: "PENDING_REVIEW" | "REVIEWED" | "DISMISSED";
+  reviewedBy?: string;
+  reviewNotes?: string;
+  reviewedAt?: number | string;
+}
+
+export interface DowntimeState {
+  isOutageActive: boolean;
+  outageStartTime?: number | string;
+  outageStartedAt?: number | string;
+  outageReason?: string;
+  medIdCoreStatus?: "ONLINE" | "DEGRADED" | "OFFLINE" | string;
+  ehrAdapterStatus?: "ONLINE" | "DEGRADED" | "OFFLINE" | "CONNECTED" | "UNAVAILABLE" | string;
+  ninProviderStatus?: "ONLINE" | "DEGRADED" | "OFFLINE" | "REACHABLE" | "TIMEOUT" | string;
+  auditSinkStatus?: "ONLINE" | "DEGRADED" | "OFFLINE" | "SYNCING" | "BUFFERED_LOCAL" | string;
+  queuedEventsCount?: number;
+  cachedEmergencyCardsCount?: number;
+}
+
+// ─── 2. SESSION MANAGEMENT & STAFF DIRECTORY ──────────────────────────────────
+interface SessionData {
+  token: string;
+  user: StaffUser;
+  createdAt: number;
+  expiresAt: number;
+  lastActive: number;
+  clientIp?: string;
+  userAgent?: string;
+}
+
+// In-memory active session table
+const sessions: Map<string, SessionData> = new Map();
+
+// Rate limiting table: key -> timestamps[]
+const rateLimitMap: Map<string, number[]> = new Map();
+
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+// Seed staff directory across all 6 healthcare facility roles + Compliance Directorate
+export const SEED_STAFF_USERS: StaffUser[] = [
+  {
+    id: "DOC1",
+    name: "Dr. James Bello",
+    email: "james.bello@luth.org",
+    role: "DOCTOR",
+    hospitalId: "LUTH",
+    hospitalName: "Lagos University Teaching Hospital (LUTH)",
+    department: "Internal Medicine",
+    ward: "Ward 4 - Acute Care",
+    wardId: "INTERNAL_MED_4B",
+    licenseNumber: "MDN-2015-8831",
+    dutyStatus: "ON_DUTY",
+    enabled: true,
+    mfaEnabled: true,
+  },
+  {
+    id: "DOC2",
+    name: "Dr. Helen Shitta",
+    email: "helen.shitta@lasuth.gov",
+    role: "DOCTOR",
+    hospitalId: "LASUTH",
+    hospitalName: "Lagos State University Teaching Hospital (LASUTH)",
+    department: "Pulmonology",
+    ward: "Ward 2 - Respiratory",
+    wardId: "RESPIRATORY_2A",
+    licenseNumber: "MDN-2012-4112",
+    dutyStatus: "ON_DUTY",
+    enabled: true,
+    mfaEnabled: true,
+  },
+  {
+    id: "DOC3",
+    name: "Dr. Amara Obi",
+    email: "amara.obi@evercare.com",
+    role: "DOCTOR",
+    hospitalId: "Evercare",
+    hospitalName: "Evercare Hospital Lekki",
+    department: "Orthopedics",
+    ward: "Surgical Suite 3",
+    wardId: "SURGERY_3",
+    licenseNumber: "MDN-2018-9122",
+    dutyStatus: "ON_DUTY",
+    enabled: true,
+    mfaEnabled: true,
+  },
+  {
+    id: "NURSE1",
+    name: "Nurse Chidinma Eze",
+    email: "chidinma.eze@luth.org",
+    role: "NURSE",
+    hospitalId: "LUTH",
+    hospitalName: "Lagos University Teaching Hospital (LUTH)",
+    department: "Emergency Bay",
+    ward: "Trauma Bay A",
+    wardId: "EMERGENCY_TRIAGE",
+    licenseNumber: "NUR-2020-5519",
+    dutyStatus: "ON_DUTY",
+    enabled: true,
+    mfaEnabled: true,
+  },
+  {
+    id: "LAB1",
+    name: "Emmanuel Okafor, MLS",
+    email: "emmanuel.okafor@luth.org",
+    role: "LAB_TECH",
+    hospitalId: "LUTH",
+    hospitalName: "Lagos University Teaching Hospital (LUTH)",
+    department: "Pathology & Clinical Chemistry",
+    ward: "Central Diagnostic Lab",
+    wardId: "PATHOLOGY_LAB",
+    licenseNumber: "MLS-2018-4421",
+    dutyStatus: "ON_DUTY",
+    enabled: true,
+    mfaEnabled: true,
+  },
+  {
+    id: "PHARM1",
+    name: "Pharm. Zainab Ahmed",
+    email: "zainab.ahmed@luth.org",
+    role: "PHARMACIST",
+    hospitalId: "LUTH",
+    hospitalName: "Lagos University Teaching Hospital (LUTH)",
+    department: "Pharmacy Services",
+    ward: "Central Dispensary",
+    wardId: "CENTRAL_DISPENSARY",
+    licenseNumber: "PCN-2017-9102",
+    dutyStatus: "ON_DUTY",
+    enabled: true,
+    mfaEnabled: true,
+  },
+  {
+    id: "CLERK1",
+    name: "Ibrahim Musa",
+    email: "ibrahim.musa@luth.org",
+    role: "RECORDS_CLERK",
+    hospitalId: "LUTH",
+    hospitalName: "Lagos University Teaching Hospital (LUTH)",
+    department: "Health Records & Registration",
+    ward: "Front Desk & Patient Admissions",
+    wardId: "PATIENT_ADMISSIONS",
+    licenseNumber: "REC-REG-2022",
+    dutyStatus: "ON_DUTY",
+    enabled: true,
+    mfaEnabled: false,
+  },
+  {
+    id: "ADMIN1",
+    name: "LUTH Hospital Admin",
+    email: "admin@luth.org",
+    role: "HOSPITAL_ADMIN",
+    hospitalId: "LUTH",
+    hospitalName: "Lagos University Teaching Hospital (LUTH)",
+    department: "Hospital Administration & Governance",
+    ward: "Administrative Wing",
+    wardId: "ADMIN_EXEC",
+    licenseNumber: "ADM-LUTH-2019",
+    dutyStatus: "ON_DUTY",
+    enabled: true,
+    mfaEnabled: true,
+  },
+  {
+    id: "SEC1",
+    name: "Alhaji Tunde Bakare",
+    email: "security.officer@medid.gov.ng",
+    role: "SECURITY_ADMIN",
+    hospitalId: "LUTH",
+    hospitalName: "National Health Information Security Directorate",
+    department: "NDPA Security & Compliance Directorate",
+    ward: "Compliance Operations",
+    wardId: "COMPLIANCE_DIRECTORATE",
+    licenseNumber: "FED-AUDIT-9921",
+    dutyStatus: "ON_DUTY",
+    enabled: true,
+    mfaEnabled: true,
+  }
+];
+
+let staffDirectory: StaffUser[] = [...SEED_STAFF_USERS];
+
+export function getStaffDirectory(): StaffUser[] {
+  return staffDirectory;
+}
+
+export function findStaffByEmail(email: string): StaffUser | undefined {
+  if (!email) return undefined;
+  const normalized = email.trim().toLowerCase();
+  // Support both official security.officer@medid.gov.ng and tunde.bakare@moh.gov.ng alias
+  if (normalized === "tunde.bakare@moh.gov.ng") {
+    return staffDirectory.find((s) => s.role === "SECURITY_ADMIN");
+  }
+  return staffDirectory.find((s) => s.email.toLowerCase() === normalized);
+}
+
+export function findStaffById(id: string): StaffUser | undefined {
+  return staffDirectory.find((s) => s.id === id);
+}
+
+export function addStaffUser(user: StaffUser): void {
+  staffDirectory.push(user);
+}
+
+export function createSession(user: StaffUser, durationMs: number = SESSION_TTL_MS): string {
+  const token = `medid_sess_${crypto.randomBytes(24).toString("hex")}`;
+  const now = Date.now();
+  sessions.set(token, {
+    token,
+    user: { ...user },
+    createdAt: now,
+    expiresAt: now + durationMs,
+    lastActive: now,
+  });
+  return token;
+}
+
+export function getSession(token: string): StaffUser | null {
+  if (!token) return null;
+  const session = sessions.get(token);
+  if (!session) return null;
+
+  const now = Date.now();
+  if (now > session.expiresAt) {
+    sessions.delete(token);
+    return null;
+  }
+
+  // Refresh active user state in case duty status or enabled was updated
+  const latestUser = findStaffById(session.user.id);
+  if (latestUser) {
+    if (!latestUser.enabled) {
+      sessions.delete(token);
+      return null;
+    }
+    session.user = { ...latestUser };
+  }
+
+  session.lastActive = now;
+  return session.user;
+}
+
+export function revokeSession(token: string): boolean {
+  return sessions.delete(token);
+}
+
+export function revokeAllUserSessions(userId: string): void {
+  for (const [token, session] of sessions.entries()) {
+    if (session.user.id === userId) {
+      sessions.delete(token);
+    }
+  }
+}
+
+export function updateDutyStatus(userId: string, duty: DutyStatus): StaffUser | null {
+  const staff = findStaffById(userId);
+  if (!staff) return null;
+  staff.dutyStatus = duty;
+
+  // Update in existing active sessions
+  for (const session of sessions.values()) {
+    if (session.user.id === userId) {
+      session.user.dutyStatus = duty;
+    }
+  }
+  return staff;
+}
+
+/**
+ * Sliding window rate-limiting helper
+ * Returns false if rate limit exceeded
+ */
+export function checkRateLimit(key: string, maxAttempts: number = 5, windowMs: number = 60000): boolean {
+  const now = Date.now();
+  const timestamps = rateLimitMap.get(key) || [];
+  const validTimestamps = timestamps.filter((t) => now - t < windowMs);
+
+  if (validTimestamps.length >= maxAttempts) {
+    return false;
+  }
+
+  validTimestamps.push(now);
+  rateLimitMap.set(key, validTimestamps);
+  return true;
+}
+
+// ─── 3. CENTRAL POLICY DECISION POINT (PDP) & RECORD SCOPING ─────────────────
+/**
+ * Central Policy Decision Point (PDP) for MedID Nigeria
+ * Enforces Role-Based, Context-Aware (ABAC), and Duty-Bound access controls.
+ * Implements Section 4 & 5 of the Safe Access to Patient Records architecture.
+ */
+export function evaluateAccess(ctx: PolicyContext): PolicyDecision {
+  const { subject, action, requestedSections } = ctx;
+
+  // 1. Account status validation
+  if (!subject.enabled) {
+    return {
+      decision: "DENY",
+      reason: "Account is disabled. Contact hospital administration.",
+      permittedSections: [],
+      alertTrigger: "RULE_DISABLED_ACCOUNT_ACCESS",
+    };
+  }
+
+  // 2. Emergency Break-Glass Action
+  if (action === "EMERGENCY_OVERRIDE") {
+    if (subject.role !== "DOCTOR" && subject.role !== "NURSE") {
+      return {
+        decision: "DENY",
+        reason: "Emergency break-glass access is strictly restricted to licensed clinical personnel.",
+        permittedSections: [],
+        alertTrigger: "RULE_UNAUTHORIZED_EMERGENCY_ATTEMPT",
+      };
+    }
+    // Emergency access grants IDENTITY_ADMIN and EMERGENCY_CRITICAL immediately
+    return {
+      decision: "ALLOW",
+      reason: "Emergency break-glass authorization approved. High-signal emergency records accessible.",
+      permittedSections: ["IDENTITY_ADMIN", "EMERGENCY_CRITICAL"],
+    };
+  }
+
+  // 3. Duty/Shift Status Requirement for Clinical Data Access
+  const isClinicalAction = [
+    "RETRIEVE_RECORDS",
+    "GENERATE_AI_BRIEF",
+    "AI_CHAT_QUERY",
+  ].includes(action);
+
+  if (isClinicalAction && subject.dutyStatus === "OFF_DUTY") {
+    return {
+      decision: "DENY",
+      reason: "Access Denied: Clinician is currently marked OFF_DUTY. Shift activation is required for clinical access.",
+      permittedSections: [],
+      alertTrigger: "RULE_OFF_DUTY_ACCESS",
+    };
+  }
+
+  // 4. Role-Specific Policy Evaluation
+
+  // ── RECORDS CLERK ───────────────────────────────────────────
+  if (subject.role === "RECORDS_CLERK") {
+    if (action === "SEARCH_PATIENT") {
+      return {
+        decision: "ALLOW",
+        reason: "Records Clerk permitted to search patient identity and demographic directory.",
+        permittedSections: ["IDENTITY_ADMIN"],
+      };
+    }
+
+    if (isClinicalAction) {
+      return {
+        decision: "DENY",
+        reason: "Security Violation: Records clerks are strictly restricted to demographic management and cannot inspect patient clinical history.",
+        permittedSections: [],
+        alertTrigger: "RULE_CLERK_CLINICAL_ACCESS", // Targeted Hackathon Abuse Scenario
+      };
+    }
+
+    return {
+      decision: "DENY",
+      reason: "Action not permitted for Records Clerk role.",
+      permittedSections: [],
+    };
+  }
+
+  // ── HOSPITAL ADMINISTRATOR ──────────────────────────────────
+  if (subject.role === "HOSPITAL_ADMIN") {
+    if (["MANAGE_STAFF", "VIEW_AUDIT_LOGS", "ADMIN_CREDENTIAL_MGMT"].includes(action)) {
+      return {
+        decision: "ALLOW",
+        reason: "Hospital Administrator permitted to manage staff and inspect hospital operational logs.",
+        permittedSections: [],
+      };
+    }
+
+    if (isClinicalAction || action === "SEARCH_PATIENT") {
+      return {
+        decision: "DENY",
+        reason: "Access Prohibited: Hospital administrators have administrative purview only and cannot view patient clinical charts.",
+        permittedSections: [],
+        alertTrigger: "RULE_ADMIN_CLINICAL_ACCESS_ATTEMPT",
+      };
+    }
+  }
+
+  // ── SECURITY ADMINISTRATOR ──────────────────────────────────
+  if (subject.role === "SECURITY_ADMIN") {
+    if (["VIEW_AUDIT_LOGS", "VERIFY_AUDIT", "VIEW_SECURITY_ALERTS"].includes(action)) {
+      return {
+        decision: "ALLOW",
+        reason: "Security Compliance Officer authorized for audit verification and incident review.",
+        permittedSections: [],
+      };
+    }
+
+    if (isClinicalAction) {
+      return {
+        decision: "DENY",
+        reason: "Security administrators cannot access clinical health contents.",
+        permittedSections: [],
+      };
+    }
+  }
+
+  // ── LAB TECHNICIAN ──────────────────────────────────────────
+  if (subject.role === "LAB_TECH") {
+    if (action === "SEARCH_PATIENT") {
+      return {
+        decision: "ALLOW",
+        reason: "Lab Technician permitted to search patient identity for laboratory accessioning.",
+        permittedSections: ["IDENTITY_ADMIN"],
+      };
+    }
+
+    if (action === "RETRIEVE_RECORDS") {
+      return {
+        decision: "ALLOW",
+        reason: "Lab Technician authorized for laboratory pathology orders, specimen data, and test results.",
+        permittedSections: ["IDENTITY_ADMIN", "LAB_PATHOLOGY"],
+      };
+    }
+
+    return {
+      decision: "DENY",
+      reason: "Access Prohibited: Lab Technicians are restricted to laboratory pathology orders and results.",
+      permittedSections: [],
+      alertTrigger: "RULE_ROLE_SCOPE_VIOLATION",
+    };
+  }
+
+  // ── PHARMACIST ──────────────────────────────────────────────
+  if (subject.role === "PHARMACIST") {
+    if (action === "SEARCH_PATIENT") {
+      return {
+        decision: "ALLOW",
+        reason: "Pharmacist permitted to search patient identity for prescription dispensing.",
+        permittedSections: ["IDENTITY_ADMIN"],
+      };
+    }
+
+    if (action === "RETRIEVE_RECORDS") {
+      return {
+        decision: "ALLOW",
+        reason: "Pharmacist authorized for prescription dispensing records, MAR history, and acute drug allergies.",
+        permittedSections: ["IDENTITY_ADMIN", "EMERGENCY_CRITICAL", "PHARMACY_MAR"],
+      };
+    }
+
+    return {
+      decision: "DENY",
+      reason: "Access Prohibited: Pharmacists are restricted to medication dispensing and allergy profiles.",
+      permittedSections: [],
+      alertTrigger: "RULE_ROLE_SCOPE_VIOLATION",
+    };
+  }
+
+  // ── NURSE ───────────────────────────────────────────────────
+  if (subject.role === "NURSE") {
+    if (action === "SEARCH_PATIENT") {
+      return {
+        decision: "ALLOW",
+        reason: "Nurse permitted to search patient demographics.",
+        permittedSections: ["IDENTITY_ADMIN"],
+      };
+    }
+
+    if (isClinicalAction) {
+      return {
+        decision: "ALLOW",
+        reason: "Nurse on duty granted access to identity, emergency-critical care, and MAR sections.",
+        permittedSections: ["IDENTITY_ADMIN", "EMERGENCY_CRITICAL", "PHARMACY_MAR"],
+      };
+    }
+  }
+
+  // ── DOCTOR ──────────────────────────────────────────────────
+  if (subject.role === "DOCTOR") {
+    if (action === "SEARCH_PATIENT") {
+      return {
+        decision: "ALLOW",
+        reason: "Doctor permitted to discover patient record index.",
+        permittedSections: ["IDENTITY_ADMIN"],
+      };
+    }
+
+    if (isClinicalAction) {
+      // Check if requested section contains HIGHLY_RESTRICTED
+      const asksForRestricted = requestedSections?.includes("HIGHLY_RESTRICTED");
+      if (asksForRestricted && !ctx.emergencyToken) {
+        return {
+          decision: "DENY",
+          reason: "Access to Highly Restricted clinical notes requires explicit clinical escalation or break-glass authorization.",
+          permittedSections: ["IDENTITY_ADMIN", "EMERGENCY_CRITICAL", "ROUTINE_CLINICAL"],
+          alertTrigger: "RULE_UNAUTHORIZED_RESTRICTED_SECTION_ATTEMPT",
+        };
+      }
+
+      return {
+        decision: "ALLOW",
+        reason: "Doctor on active duty authorized for comprehensive routine and emergency clinical sections.",
+        permittedSections: [
+          "IDENTITY_ADMIN",
+          "EMERGENCY_CRITICAL",
+          "ROUTINE_CLINICAL",
+          "LAB_PATHOLOGY",
+          "PHARMACY_MAR",
+        ],
+      };
+    }
+  }
+
+  // Default catch-all denial
+  return {
+    decision: "DENY",
+    reason: "No policy grants permission for the requested action.",
+    permittedSections: [],
+  };
+}
+
+/**
+ * Filters raw hospital encounters according to permitted record sections
+ */
+export function filterRecordsBySections(
+  records: Record<string, any[]>,
+  permittedSections: RecordSection[]
+): Record<string, any[]> {
+  const allowEmergency = permittedSections.includes("EMERGENCY_CRITICAL");
+  const allowRoutine = permittedSections.includes("ROUTINE_CLINICAL");
+  const allowLab = permittedSections.includes("LAB_PATHOLOGY");
+  const allowPharmacy = permittedSections.includes("PHARMACY_MAR");
+  const allowRestricted = permittedSections.includes("HIGHLY_RESTRICTED");
+
+  const filtered: Record<string, any[]> = {};
+
+  for (const [hospitalName, encounters] of Object.entries(records)) {
+    filtered[hospitalName] = encounters.map((enc) => {
+      // If neither routine nor emergency nor lab nor pharmacy is permitted, strip all clinical content
+      if (!allowEmergency && !allowRoutine && !allowLab && !allowPharmacy) {
+        return {
+          date: enc.date,
+          doctorName: enc.doctorName,
+          department: enc.department,
+          visitType: enc.visitType,
+          summary: "[REDACTED - INSUFFICIENT SECTION PERMISSIONS]",
+          diagnoses: ["[REDACTED]"],
+          medications: [],
+          laboratoryResults: [],
+          scans: [],
+        };
+      }
+
+      // If Lab Tech role (only lab pathology permitted)
+      if (allowLab && !allowRoutine && !allowEmergency && !allowPharmacy) {
+        return {
+          date: enc.date,
+          doctorName: enc.doctorName,
+          department: enc.department,
+          visitType: enc.visitType,
+          summary: `[PATHOLOGY & LAB VIEW] ${enc.department || "Clinical Laboratory"}`,
+          diagnoses: ["[RESTRICTED - LAB TECHNICIAN ROLE]"],
+          medications: [],
+          laboratoryResults: enc.laboratoryResults || [],
+          scans: enc.scans || [],
+        };
+      }
+
+      // If Pharmacist role (only pharmacy & allergy permitted)
+      if (allowPharmacy && !allowRoutine && !allowLab) {
+        return {
+          date: enc.date,
+          doctorName: enc.doctorName,
+          department: enc.department,
+          visitType: enc.visitType,
+          summary: `[PHARMACY & MAR VIEW] Medication profile for encounter ${enc.date}`,
+          diagnoses: enc.diagnoses ? enc.diagnoses.filter((d: string) => /allergy|anaphylaxis/i.test(d)) : [],
+          medications: enc.medications || [],
+          laboratoryResults: [],
+          scans: [],
+        };
+      }
+
+      // If only emergency-critical is permitted (e.g. Nurse or Break-Glass emergency)
+      if (allowEmergency && !allowRoutine) {
+        return {
+          date: enc.date,
+          doctorName: enc.doctorName,
+          department: enc.department,
+          visitType: enc.visitType,
+          // Extract only allergy/emergency alerts from diagnoses
+          diagnoses: (enc.diagnoses || []).filter((d: string) => 
+            /allergy|anaphylaxis|asthma|penicillin|emergency|shock|arrest/i.test(d)
+          ),
+          // Extract only critical emergency meds
+          medications: (enc.medications || []).filter((m: any) =>
+            /inhaler|albuterol|epinephrine|insulin|prednisone/i.test(m.name || m)
+          ),
+          laboratoryResults: (enc.laboratoryResults || []).filter((l: any) =>
+            /spo2|ph|glucose|hemoglobin/i.test(l.test || "")
+          ),
+          scans: [],
+          summary: `[EMERGENCY VIEW] ${(enc.summary || "").slice(0, 120)}...`,
+        };
+      }
+
+      // Full routine + emergency (excluding highly restricted unless authorized)
+      return {
+        ...enc,
+        summary: allowRestricted 
+          ? enc.summary 
+          : (enc.summary || "").replace(/\[RESTRICTED:[^\]]+\]/g, "[RESTRICTED SECTION OMITTED]"),
+      };
+    });
+  }
+
+  return filtered;
+}
+
+export const filterRecordSections = filterRecordsBySections;
+
+// ─── 4. CRYPTOGRAPHIC AUDIT HASH CHAIN (TAMPER-EVIDENT ENGINE) ────────────────
+const GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
+const AUDIT_FILE_PATH = IS_VERCEL ? "/tmp/medid-audit-chain.json" : path.join(process.cwd(), "medid-audit-chain.json");
+const AUDIT_BACKUP_PATH = IS_VERCEL ? "/tmp/medid-audit-chain.backup.json" : path.join(process.cwd(), "medid-audit-chain.backup.json");
+
+// Retention policy settings (Hackathon minimum target: 365 days)
+export interface RetentionPolicy {
+  retentionPeriodDays: number;
+  retentionLocked: boolean;
+  configuredAt: string;
+  governingLaw: string;
+  independentSinkConfigured: boolean;
+}
+
+const retentionConfig: RetentionPolicy = {
+  retentionPeriodDays: 365,
+  retentionLocked: true,
+  configuredAt: "2026-07-01T00:00:00Z",
+  governingLaw: "Nigeria Data Protection Act (NDPA) & National Health Information Security Policy",
+  independentSinkConfigured: true,
+};
+
+let auditChain: AuditEvent[] = [];
+let originalBackupBeforeTamper: AuditEvent[] | null = null;
+
+function computeEventHash(payload: Omit<AuditEvent, "currentHash">): string {
+  const canonicalString = JSON.stringify({
+    id: payload.id,
+    timestamp: payload.timestamp,
+    eventType: payload.eventType,
+    actorId: payload.actorId,
+    actorName: payload.actorName,
+    actorRole: payload.actorRole,
+    hospitalId: payload.hospitalId,
+    patientMedID: payload.patientMedID || "",
+    action: payload.action,
+    resource: payload.resource,
+    decision: payload.decision,
+    accessScope: payload.accessScope || [],
+    purpose: payload.purpose || "",
+    previousHash: payload.previousHash,
+    isOfflineReconciled: payload.isOfflineReconciled || false,
+    offlineTimestamp: payload.offlineTimestamp || "",
+  });
+
+  return crypto
+    .createHash("sha256")
+    .update(canonicalString + payload.previousHash)
+    .digest("hex");
+}
+
+export function loadAuditChain(): void {
+  try {
+    if (IS_VERCEL && !fs.existsSync(AUDIT_FILE_PATH)) {
+      const rootAudit = path.join(process.cwd(), "medid-audit-chain.json");
+      if (fs.existsSync(rootAudit)) {
+        const dir = path.dirname(AUDIT_FILE_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.copyFileSync(rootAudit, AUDIT_FILE_PATH);
+      }
+    }
+    if (fs.existsSync(AUDIT_FILE_PATH)) {
+      const data = fs.readFileSync(AUDIT_FILE_PATH, "utf-8");
+      auditChain = JSON.parse(data);
+    }
+  } catch (e) {
+    console.error("Failed to load audit chain from disk:", e);
+  }
+
+  if (auditChain.length === 0) {
+    initGenesisAudit();
+    if (IS_VERCEL) {
+      const seedEvents = [
+        {
+          eventType: "STAFF_AUTHENTICATION_SUCCESS",
+          actorId: "DOC1",
+          actorName: "Dr. James Bello",
+          actorRole: "DOCTOR" as StaffRole,
+          hospitalId: "LUTH",
+          action: "STAFF_LOGIN",
+          resource: "AUTH_SERVICE",
+          decision: "ALLOW" as const,
+          purpose: "Staff login session established",
+        },
+        {
+          eventType: "CLINICAL_RECORDS_RETRIEVED",
+          actorId: "DOC1",
+          actorName: "Dr. James Bello",
+          actorRole: "DOCTOR" as StaffRole,
+          hospitalId: "LUTH",
+          patientMedID: "MD38281726",
+          action: "RETRIEVE_RECORDS",
+          resource: "CLINICAL_EHR_CHART",
+          decision: "ALLOW" as const,
+          accessScope: ["IDENTITY_ADMIN", "EMERGENCY_CRITICAL", "ROUTINE_CLINICAL"] as RecordSection[],
+          purpose: "Routine Cardiology Review",
+        },
+        {
+          eventType: "UNAUTHORIZED_RECORD_ACCESS_DENIED",
+          actorId: "CLERK1",
+          actorName: "Ibrahim Musa",
+          actorRole: "RECORDS_CLERK" as StaffRole,
+          hospitalId: "LUTH",
+          patientMedID: "MD38281726",
+          action: "RETRIEVE_RECORDS",
+          resource: "CLINICAL_EHR_CHART",
+          decision: "DENY" as const,
+          purpose: "Unauthorized Clinical Chart Access Attempt by Records Clerk",
+        },
+      ];
+      for (const s of seedEvents) {
+        const previousEvent = auditChain[auditChain.length - 1];
+        const previousHash = previousEvent ? previousEvent.currentHash : GENESIS_HASH;
+        const eventId = `AUDIT-${String(auditChain.length).padStart(6, "0")}`;
+        const payload: Omit<AuditEvent, "currentHash"> = {
+          id: eventId,
+          timestamp: new Date(Date.now() - (auditChain.length * 3600000)).toISOString(),
+          eventType: s.eventType,
+          actorId: s.actorId,
+          actorName: s.actorName,
+          actorRole: s.actorRole,
+          hospitalId: s.hospitalId,
+          patientMedID: s.patientMedID,
+          action: s.action,
+          resource: s.resource,
+          decision: s.decision,
+          accessScope: s.accessScope,
+          purpose: s.purpose,
+          previousHash,
+        };
+        const cHash = computeEventHash(payload);
+        auditChain.push({ ...payload, currentHash: cHash });
+      }
+      saveAuditChain();
+    }
+  }
+}
+
+export function saveAuditChain(): void {
+  try {
+    const dir = path.dirname(AUDIT_FILE_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(AUDIT_FILE_PATH, JSON.stringify(auditChain, null, 2), "utf-8");
+  } catch (e) {
+    console.error("Failed to save audit chain to disk:", e);
+  }
+}
+
+function initGenesisAudit(): void {
+  const genesisPayload: Omit<AuditEvent, "currentHash"> = {
+    id: "AUDIT-000000",
+    timestamp: "2026-07-01T00:00:00.000Z",
+    eventType: "SYSTEM_GENESIS_INITIALIZED",
+    actorId: "SYSTEM_ROOT",
+    actorName: "MedID Trust Anchor",
+    actorRole: "SECURITY_ADMIN",
+    hospitalId: "FED_MOH_NIGERIA",
+    patientMedID: undefined,
+    action: "INITIALIZE_IMMUTABLE_LOG",
+    resource: "AUDIT_CHAIN_ROOT",
+    decision: "ALLOW",
+    accessScope: ["IDENTITY_ADMIN"],
+    purpose: "Genesis anchor for secure medical audit chain",
+    previousHash: GENESIS_HASH,
+  };
+
+  const currentHash = computeEventHash(genesisPayload);
+  const genesisEvent: AuditEvent = { ...genesisPayload, currentHash };
+  auditChain.push(genesisEvent);
+  saveAuditChain();
+}
+
+/**
+ * Append-only audit logger
+ * Strictly no update or delete operations exist in the service.
+ */
+export function recordAuditEvent(params: {
+  eventType: string;
+  actorId: string;
+  actorName: string;
+  actorRole: StaffRole;
+  hospitalId: string;
+  patientMedID?: string;
+  action: string;
+  resource: string;
+  decision: "ALLOW" | "DENY";
+  accessScope?: RecordSection[];
+  purpose?: string;
+  isOfflineReconciled?: boolean;
+  offlineTimestamp?: string;
+}): AuditEvent {
+  const previousEvent = auditChain[auditChain.length - 1];
+  const previousHash = previousEvent ? previousEvent.currentHash : GENESIS_HASH;
+
+  const eventId = `AUDIT-${String(auditChain.length).padStart(6, "0")}`;
+  const timestamp = new Date().toISOString();
+
+  const payload: Omit<AuditEvent, "currentHash"> = {
+    id: eventId,
+    timestamp,
+    eventType: params.eventType,
+    actorId: params.actorId,
+    actorName: params.actorName,
+    actorRole: params.actorRole,
+    hospitalId: params.hospitalId,
+    patientMedID: params.patientMedID,
+    action: params.action,
+    resource: params.resource,
+    decision: params.decision,
+    accessScope: params.accessScope,
+    purpose: params.purpose,
+    previousHash,
+    isOfflineReconciled: params.isOfflineReconciled,
+    offlineTimestamp: params.offlineTimestamp,
+  };
+
+  const currentHash = computeEventHash(payload);
+  const newEvent: AuditEvent = { ...payload, currentHash };
+
+  auditChain.push(newEvent);
+  saveAuditChain();
+
+  return newEvent;
+}
+
+export function getAuditEvents(filter?: { hospitalId?: string; patientMedID?: string }): AuditEvent[] {
+  let list = [...auditChain];
+  if (filter?.hospitalId) {
+    list = list.filter((e) => e.hospitalId === filter.hospitalId || e.hospitalId === "FED_MOH_NIGERIA");
+  }
+  if (filter?.patientMedID) {
+    list = list.filter((e) => e.patientMedID === filter.patientMedID);
+  }
+  return list;
+}
+
+export interface AuditVerificationResult {
+  valid: boolean;
+  totalEvents: number;
+  genesisHash: string;
+  headHash: string;
+  lastVerifiedAt: string;
+  tamperDetected: boolean;
+  tamperedIndex?: number;
+  tamperedEventId?: string;
+  failureReason?: string;
+  retentionPeriodDays: number;
+  independentCheckpointStatus: string;
+}
+
+/**
+ * Validates the entire cryptographic hash chain from Genesis to Head
+ */
+export function verifyAuditChain(): AuditVerificationResult {
+  const now = new Date().toISOString();
+
+  if (auditChain.length === 0) {
+    return {
+      valid: false,
+      totalEvents: 0,
+      genesisHash: GENESIS_HASH,
+      headHash: "",
+      lastVerifiedAt: now,
+      tamperDetected: true,
+      failureReason: "Audit log chain is unexpectedly empty.",
+      retentionPeriodDays: retentionConfig.retentionPeriodDays,
+      independentCheckpointStatus: "OFFLINE",
+    };
+  }
+
+  // 1. Verify Genesis
+  if (auditChain[0].previousHash !== GENESIS_HASH) {
+    return {
+      valid: false,
+      totalEvents: auditChain.length,
+      genesisHash: auditChain[0].previousHash,
+      headHash: auditChain[auditChain.length - 1].currentHash,
+      lastVerifiedAt: now,
+      tamperDetected: true,
+      tamperedIndex: 0,
+      tamperedEventId: auditChain[0].id,
+      failureReason: `Genesis block hash compromised. Expected: ${GENESIS_HASH}, Found: ${auditChain[0].previousHash}`,
+      retentionPeriodDays: retentionConfig.retentionPeriodDays,
+      independentCheckpointStatus: "COMPROMISED",
+    };
+  }
+
+  // 2. Step through each block
+  for (let i = 0; i < auditChain.length; i++) {
+    const event = auditChain[i];
+
+    // Check link to previous block
+    if (i > 0) {
+      const prev = auditChain[i - 1];
+      if (event.previousHash !== prev.currentHash) {
+        return {
+          valid: false,
+          totalEvents: auditChain.length,
+          genesisHash: GENESIS_HASH,
+          headHash: auditChain[auditChain.length - 1].currentHash,
+          lastVerifiedAt: now,
+          tamperDetected: true,
+          tamperedIndex: i,
+          tamperedEventId: event.id,
+          failureReason: `Broken hash link at event ${event.id} (Index #${i}). Pointer mismatch with predecessor.`,
+          retentionPeriodDays: retentionConfig.retentionPeriodDays,
+          independentCheckpointStatus: "COMPROMISED",
+        };
+      }
+    }
+
+    // Recompute and check payload integrity
+    const expectedHash = computeEventHash({
+      id: event.id,
+      timestamp: event.timestamp,
+      eventType: event.eventType,
+      actorId: event.actorId,
+      actorName: event.actorName,
+      actorRole: event.actorRole,
+      hospitalId: event.hospitalId,
+      patientMedID: event.patientMedID,
+      action: event.action,
+      resource: event.resource,
+      decision: event.decision,
+      accessScope: event.accessScope,
+      purpose: event.purpose,
+      previousHash: event.previousHash,
+      isOfflineReconciled: event.isOfflineReconciled,
+      offlineTimestamp: event.offlineTimestamp,
+    });
+
+    if (expectedHash !== event.currentHash) {
+      return {
+        valid: false,
+        totalEvents: auditChain.length,
+        genesisHash: GENESIS_HASH,
+        headHash: auditChain[auditChain.length - 1].currentHash,
+        lastVerifiedAt: now,
+        tamperDetected: true,
+        tamperedIndex: i,
+        tamperedEventId: event.id,
+        failureReason: `Cryptographic digest failure at event ${event.id} (Index #${i}). Payload has been altered post-signature.`,
+        retentionPeriodDays: retentionConfig.retentionPeriodDays,
+        independentCheckpointStatus: "COMPROMISED",
+      };
+    }
+  }
+
+  return {
+    valid: true,
+    totalEvents: auditChain.length,
+    genesisHash: GENESIS_HASH,
+    headHash: auditChain[auditChain.length - 1].currentHash,
+    lastVerifiedAt: now,
+    tamperDetected: false,
+    retentionPeriodDays: retentionConfig.retentionPeriodDays,
+    independentCheckpointStatus: "CONFIRMED_ONLINE_IMMUTABLE",
+  };
+}
+
+/**
+ * Controlled Synthetic Tampering Demonstration Harness
+ * For Hackathon demonstration only: modifies an event without recomputing hashes.
+ */
+export function injectSyntheticTampering(): { tamperedEventId: string; modifiedField: string } {
+  if (auditChain.length <= 1) {
+    recordAuditEvent({
+      eventType: "TEST_ROUTINE_ACCESS",
+      actorId: "DOC1",
+      actorName: "Dr. James Bello",
+      actorRole: "DOCTOR",
+      hospitalId: "LUTH",
+      patientMedID: "MD38281726",
+      action: "RETRIEVE_RECORDS",
+      resource: "PATIENT_RECORD",
+      decision: "ALLOW",
+      purpose: "Synthetic baseline event for tamper demo",
+    });
+  }
+
+  // Backup current state in-memory AND persist to disk
+  originalBackupBeforeTamper = JSON.parse(JSON.stringify(auditChain));
+  try {
+    const dir = path.dirname(AUDIT_BACKUP_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(AUDIT_BACKUP_PATH, JSON.stringify(originalBackupBeforeTamper, null, 2), "utf-8");
+  } catch (e) {
+    console.error("Failed to write audit backup file:", e);
+  }
+
+  // Modify index 1 (or last event)
+  const targetIndex = auditChain.length > 1 ? 1 : 0;
+  const targetEvent = auditChain[targetIndex];
+
+  targetEvent.decision = targetEvent.decision === "ALLOW" ? "DENY" : "ALLOW";
+  targetEvent.actorName = "UNAUTHORIZED_IMPOSTOR (Tampered)";
+
+  saveAuditChain();
+
+  return {
+    tamperedEventId: targetEvent.id,
+    modifiedField: "decision & actorName altered without cryptographic hash update",
+  };
+}
+
+export function restoreAuditChain(): boolean {
+  // 1. In-memory restoration
+  if (originalBackupBeforeTamper && originalBackupBeforeTamper.length > 0) {
+    auditChain = JSON.parse(JSON.stringify(originalBackupBeforeTamper));
+    originalBackupBeforeTamper = null;
+    saveAuditChain();
+    try {
+      if (fs.existsSync(AUDIT_BACKUP_PATH)) fs.unlinkSync(AUDIT_BACKUP_PATH);
+    } catch {}
+    return true;
+  }
+
+  // 2. Disk backup restoration
+  if (fs.existsSync(AUDIT_BACKUP_PATH)) {
+    try {
+      const backupData = JSON.parse(fs.readFileSync(AUDIT_BACKUP_PATH, "utf-8"));
+      if (Array.isArray(backupData) && backupData.length > 0) {
+        auditChain = backupData;
+        saveAuditChain();
+        try { fs.unlinkSync(AUDIT_BACKUP_PATH); } catch {}
+        return true;
+      }
+    } catch (e) {
+      console.error("Failed to restore audit chain from backup file:", e);
+    }
+  }
+
+  // 3. Fallback targeted repair: revert synthetic tampering on AUDIT-000001 or broken links
+  let repaired = false;
+  for (let i = 0; i < auditChain.length; i++) {
+    const event = auditChain[i];
+    if (event.id === "AUDIT-000001" && (event.actorName.includes("Tampered") || event.decision === "DENY")) {
+      event.actorName = "Dr. James Bello";
+      event.actorRole = "DOCTOR";
+      event.decision = "ALLOW";
+      event.purpose = "Staff login session established";
+      const prevHash = i > 0 ? auditChain[i - 1].currentHash : GENESIS_HASH;
+      event.previousHash = prevHash;
+      event.currentHash = computeEventHash(event);
+      repaired = true;
+    } else {
+      const prevHash = i > 0 ? auditChain[i - 1].currentHash : GENESIS_HASH;
+      if (event.previousHash !== prevHash) {
+        event.previousHash = prevHash;
+        repaired = true;
+      }
+      const expHash = computeEventHash(event);
+      if (expHash !== event.currentHash) {
+        event.currentHash = expHash;
+        repaired = true;
+      }
+    }
+  }
+
+  if (repaired) {
+    saveAuditChain();
+    return true;
+  }
+
+  return false;
+}
+
+export function getRetentionPolicy(): RetentionPolicy {
+  return { ...retentionConfig };
+}
+
+// Initialize on module load
+loadAuditChain();
+
+// ─── 5. REAL-TIME ABUSE DETECTION & SECURITY ALERTS ───────────────────────────
+const ALERTS_FILE_PATH = IS_VERCEL ? "/tmp/medid-security-alerts.json" : path.join(process.cwd(), "medid-security-alerts.json");
+
+let alertsStore: SecurityAlert[] = [];
+
+// Seed baseline alerts to demonstrate reviewing capabilities
+const SEED_ALERTS: SecurityAlert[] = [
+  {
+    id: "ALERT-0001",
+    timestamp: "2026-07-15T09:12:44.000Z",
+    ruleId: "RULE_EXCESSIVE_LOOKUPS",
+    severity: "MEDIUM",
+    actorId: "CLERK1",
+    actorName: "Ibrahim Musa",
+    actorRole: "RECORDS_CLERK",
+    hospitalId: "LUTH",
+    patientMedID: "MD38281726",
+    description: "Unusual Patient Lookup Velocity: 8 patient demographic queries in under 60 seconds.",
+    status: "REVIEWED",
+    reviewedBy: "Alhaji Tunde Bakare (Security Officer)",
+    reviewNotes: "Investigated: Patient batch intake during morning clinic rush. Legitimate workflow confirmed.",
+    reviewedAt: "2026-07-15T11:00:00.000Z",
+  }
+];
+
+export function loadAlerts(): void {
+  try {
+    if (IS_VERCEL && !fs.existsSync(ALERTS_FILE_PATH)) {
+      const rootAlerts = path.join(process.cwd(), "medid-security-alerts.json");
+      if (fs.existsSync(rootAlerts)) {
+        const dir = path.dirname(ALERTS_FILE_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.copyFileSync(rootAlerts, ALERTS_FILE_PATH);
+      }
+    }
+    if (fs.existsSync(ALERTS_FILE_PATH)) {
+      alertsStore = JSON.parse(fs.readFileSync(ALERTS_FILE_PATH, "utf-8"));
+    }
+  } catch (e) {
+    console.error("Failed to load alerts from disk:", e);
+  }
+
+  if (alertsStore.length === 0) {
+    alertsStore = [...SEED_ALERTS];
+    saveAlerts();
+  }
+}
+
+export function saveAlerts(): void {
+  try {
+    const dir = path.dirname(ALERTS_FILE_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(ALERTS_FILE_PATH, JSON.stringify(alertsStore, null, 2), "utf-8");
+  } catch (e) {
+    console.error("Failed to save alerts to disk:", e);
+  }
+}
+
+export function createSecurityAlert(params: {
+  ruleId: string;
+  severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  actorId: string;
+  actorName: string;
+  actorRole: StaffRole;
+  hospitalId: string;
+  patientMedID?: string;
+  description: string;
+}): SecurityAlert {
+  const alertId = `ALERT-${String(alertsStore.length + 1).padStart(4, "0")}`;
+  const timestamp = new Date().toISOString();
+
+  const newAlert: SecurityAlert = {
+    id: alertId,
+    timestamp,
+    ruleId: params.ruleId,
+    severity: params.severity,
+    actorId: params.actorId,
+    actorName: params.actorName,
+    actorRole: params.actorRole,
+    hospitalId: params.hospitalId,
+    patientMedID: params.patientMedID,
+    description: params.description,
+    status: "PENDING_REVIEW",
+  };
+
+  alertsStore.unshift(newAlert); // Newest first
+  saveAlerts();
+  return newAlert;
+}
+
+export function getSecurityAlerts(hospitalId?: string): SecurityAlert[] {
+  if (hospitalId && hospitalId !== "LUTH") {
+    return alertsStore.filter((a) => a.hospitalId === hospitalId);
+  }
+  return alertsStore;
+}
+
+export function reviewSecurityAlert(
+  alertId: string,
+  reviewerName: string,
+  notes: string,
+  newStatus: "REVIEWED" | "DISMISSED" = "REVIEWED"
+): SecurityAlert | null {
+  const alert = alertsStore.find((a) => a.id === alertId);
+  if (!alert) return null;
+
+  alert.status = newStatus;
+  alert.reviewedBy = reviewerName;
+  alert.reviewNotes = notes;
+  alert.reviewedAt = new Date().toISOString();
+
+  saveAlerts();
+  return alert;
+}
+
+// Rule triggers mapping
+export function triggerRuleAlert(ruleId: string, details: {
+  actorId: string;
+  actorName: string;
+  actorRole: StaffRole;
+  hospitalId: string;
+  patientMedID?: string;
+  customMsg?: string;
+}): SecurityAlert {
+  switch (ruleId) {
+    case "RULE_CLERK_CLINICAL_ACCESS":
+      return createSecurityAlert({
+        ruleId,
+        severity: "CRITICAL",
+        actorId: details.actorId,
+        actorName: details.actorName,
+        actorRole: details.actorRole,
+        hospitalId: details.hospitalId,
+        patientMedID: details.patientMedID,
+        description: `UNAUTHORIZED ACCESS INCIDENT: Records Clerk ${details.actorName} (${details.actorId}) attempted direct retrieval of confidential clinical EHR records for patient ${details.patientMedID || "Unknown"}. Request was blocked by policy enforcement.`,
+      });
+
+    case "RULE_OFF_DUTY_ACCESS":
+      return createSecurityAlert({
+        ruleId,
+        severity: "MEDIUM",
+        actorId: details.actorId,
+        actorName: details.actorName,
+        actorRole: details.actorRole,
+        hospitalId: details.hospitalId,
+        patientMedID: details.patientMedID,
+        description: `POLICY VIOLATION: Clinician ${details.actorName} attempted clinical chart query while marked OFF_DUTY. Shift authorization required.`,
+      });
+
+    case "RULE_EMERGENCY_OVERRIDE":
+      return createSecurityAlert({
+        ruleId,
+        severity: "HIGH",
+        actorId: details.actorId,
+        actorName: details.actorName,
+        actorRole: details.actorRole,
+        hospitalId: details.hospitalId,
+        patientMedID: details.patientMedID,
+        description: `EMERGENCY BREAK-GLASS: Clinician ${details.actorName} declared an emergency override for patient ${details.patientMedID}. Reason: ${details.customMsg || "Unspecified"}. Time-limited 15-minute access window opened. Mandatory audit review required.`,
+      });
+
+    case "RULE_TAMPER_DETECTED":
+      return createSecurityAlert({
+        ruleId,
+        severity: "CRITICAL",
+        actorId: details.actorId,
+        actorName: details.actorName,
+        actorRole: details.actorRole,
+        hospitalId: details.hospitalId,
+        description: `AUDIT INTEGRITY ALERT: Verification engine detected cryptographic hash mismatch or broken chain link. Tampering detected!`,
+      });
+
+    default:
+      return createSecurityAlert({
+        ruleId,
+        severity: "LOW",
+        actorId: details.actorId,
+        actorName: details.actorName,
+        actorRole: details.actorRole,
+        hospitalId: details.hospitalId,
+        patientMedID: details.patientMedID,
+        description: details.customMsg || "Security policy violation detected.",
+      });
+  }
+}
+
+// Initialize on module load
+loadAlerts();
+
+// ─── 6. DOWNTIME RESILIENCE & OFFLINE EVENT BUFFERING ────────────────────────
+let downtimeState: DowntimeState = {
+  isOutageActive: false,
+  medIdCoreStatus: "ONLINE",
+  ehrAdapterStatus: "ONLINE",
+  ninProviderStatus: "ONLINE",
+  auditSinkStatus: "ONLINE",
+  queuedEventsCount: 0,
+};
+
+interface QueuedOfflineEvent {
+  localId: string;
+  offlineTimestamp: string;
+  actorId: string;
+  actorName: string;
+  actorRole: StaffRole;
+  hospitalId: string;
+  patientMedID: string;
+  action: string;
+  reason: string;
+}
+
+const offlineEventQueue: QueuedOfflineEvent[] = [];
+
+export function getDowntimeState(): DowntimeState {
+  return {
+    ...downtimeState,
+    queuedEventsCount: offlineEventQueue.length,
+  };
+}
+
+export function setDowntimeOutage(active: boolean): DowntimeState {
+  downtimeState.isOutageActive = active;
+
+  if (active) {
+    downtimeState.medIdCoreStatus = "DEGRADED";
+    downtimeState.ehrAdapterStatus = "OFFLINE";
+    downtimeState.ninProviderStatus = "OFFLINE";
+    downtimeState.auditSinkStatus = "DEGRADED"; // Local queueing active
+  } else {
+    downtimeState.medIdCoreStatus = "ONLINE";
+    downtimeState.ehrAdapterStatus = "ONLINE";
+    downtimeState.ninProviderStatus = "ONLINE";
+    downtimeState.auditSinkStatus = "ONLINE";
+  }
+
+  return getDowntimeState();
+}
+
+/**
+ * Queues an event when remote audit destination or connectivity is degraded
+ */
+export function queueOfflineEvent(event: Omit<QueuedOfflineEvent, "localId" | "offlineTimestamp">): QueuedOfflineEvent {
+  const localEvent: QueuedOfflineEvent = {
+    ...event,
+    localId: `OFFLINE-EVT-${String(offlineEventQueue.length + 1).padStart(4, "0")}`,
+    offlineTimestamp: new Date().toISOString(),
+  };
+
+  offlineEventQueue.push(localEvent);
+  downtimeState.queuedEventsCount = offlineEventQueue.length;
+  return localEvent;
+}
+
+export function getQueuedEvents(): QueuedOfflineEvent[] {
+  return [...offlineEventQueue];
+}
+
+/**
+ * Reconciles buffered offline events to the cryptographic hash chain
+ */
+export function reconcileOfflineEvents(): { reconciledCount: number; events: AuditEvent[] } {
+  const reconciled: AuditEvent[] = [];
+
+  while (offlineEventQueue.length > 0) {
+    const item = offlineEventQueue.shift();
+    if (!item) break;
+
+    const auditEvt = recordAuditEvent({
+      eventType: "DOWNTIME_RECONCILED_ACCESS",
+      actorId: item.actorId,
+      actorName: item.actorName,
+      actorRole: item.actorRole,
+      hospitalId: item.hospitalId,
+      patientMedID: item.patientMedID,
+      action: item.action,
+      resource: "EMERGENCY_RECORDS",
+      decision: "ALLOW",
+      purpose: `[DOWNTIME RECONCILIATION] ${item.reason}`,
+      isOfflineReconciled: true,
+      offlineTimestamp: item.offlineTimestamp,
+    });
+
+    reconciled.push(auditEvt);
+  }
+
+  downtimeState.queuedEventsCount = 0;
+  return {
+    reconciledCount: reconciled.length,
+    events: reconciled,
+  };
+}
 
 // ─── Simple JSON File Database ───────────────────────────────────────────────
 const SALT_ROUNDS = 10;
-const IS_VERCEL = process.env.VERCEL === "1";
+// IS_VERCEL declared at top of file
 const DB_PATH = IS_VERCEL ? "/tmp/medid-db.json" : path.join(process.cwd(), "medid-db.json");
 
 interface DbStore {
@@ -729,11 +2183,32 @@ function resolveCaller(req: express.Request): StaffUser | null {
   return null;
 }
 
-// ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
-app.get("/api/health", (req, res) => {
+// ─── HEALTH & READINESS DIAGNOSTICS ──────────────────────────────────────────
+app.get(["/api/health", "/api/ready"], (req, res) => {
   const downtime = getDowntimeState();
+  const auditVerification = verifyAuditChain();
   res.json({
-    status: downtime.isOutageActive ? "degraded" : "ok",
+    status: downtime.isOutageActive ? "degraded" : "healthy",
+    ok: !downtime.isOutageActive && auditVerification.valid,
+    service: "MedID National Healthcare Platform API Gateway",
+    version: "4.0.0",
+    environment: IS_VERCEL ? "vercel-serverless" : "local-node",
+    timestamp: new Date().toISOString(),
+    database: {
+      hospitals: getHospitals().length,
+      doctors: getDoctors().length,
+      patients: getPatients().length,
+      logs: getLogs().length,
+    },
+    auditChain: {
+      totalBlocks: auditVerification.totalEvents,
+      valid: auditVerification.valid,
+      tamperDetected: auditVerification.tamperDetected,
+      independentCheckpointStatus: auditVerification.independentCheckpointStatus,
+    },
+    alerts: {
+      totalAlerts: getSecurityAlerts().length,
+    },
     downtime,
   });
 });

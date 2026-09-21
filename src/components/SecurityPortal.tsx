@@ -24,6 +24,7 @@ import {
   UserCheck
 } from "lucide-react";
 import { AuditVerification, SecurityAlert } from "../types";
+import { safeFetchJson } from "../utils/api";
 
 interface SecurityPortalProps {
   onBack: () => void;
@@ -60,14 +61,22 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
     setError("");
     try {
       const [verifyRes, logsRes] = await Promise.all([
-        fetch("/api/audit/verify"),
-        fetch("/api/audit/logs")
+        safeFetchJson<AuditVerification>("/api/audit/verify"),
+        safeFetchJson<any[]>("/api/audit/logs")
       ]);
-      const verifyData = await verifyRes.json();
-      const logsData = await logsRes.json();
-      setVerification(verifyData);
-      setAuditLogs(Array.isArray(logsData) ? logsData.slice().reverse() : []);
-      setTamperSimulated(verifyData.tamperDetected);
+
+      if (verifyRes.ok && verifyRes.data) {
+        setVerification(verifyRes.data);
+        setTamperSimulated(verifyRes.data.tamperDetected);
+      } else {
+        setError(verifyRes.error || "Failed to reach audit verification service.");
+      }
+
+      if (logsRes.ok && Array.isArray(logsRes.data)) {
+        setAuditLogs(logsRes.data.slice().reverse());
+      } else {
+        setAuditLogs([]);
+      }
     } catch (err) {
       setError("Failed to reach audit verification service.");
     } finally {
@@ -77,9 +86,10 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
 
   const fetchAlerts = async () => {
     try {
-      const res = await fetch("/api/security/alerts");
-      const data = await res.json();
-      setAlerts(Array.isArray(data) ? data : []);
+      const res = await safeFetchJson<SecurityAlert[]>("/api/security/alerts");
+      if (res.ok && Array.isArray(res.data)) {
+        setAlerts(res.data);
+      }
     } catch (err) {
       console.error("Alerts fetch error:", err);
     }
@@ -89,14 +99,13 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
     setError("");
     setSuccess("");
     try {
-      const res = await fetch("/api/audit/tamper-demo", { method: "POST" });
-      const data = await res.json();
+      const res = await safeFetchJson<{ tamperedEventId?: string; error?: string }>("/api/audit/tamper-demo", { method: "POST" });
       if (res.ok) {
         setTamperSimulated(true);
-        setSuccess("Database record tampered. Re-running verification engine...");
+        setSuccess(`Database record tampered (Block #${res.data?.tamperedEventId || 'AUDIT-000001'}). Re-running verification engine...`);
         await fetchAuditStatus();
       } else {
-        setError(data.error || "Failed to inject tamper demonstration.");
+        setError(res.error || "Failed to inject tamper demonstration.");
       }
     } catch (err) {
       setError("Network failure during tamper test.");
@@ -107,14 +116,13 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
     setError("");
     setSuccess("");
     try {
-      const res = await fetch("/api/audit/reset-tamper", { method: "POST" });
-      const data = await res.json();
+      const res = await safeFetchJson<{ error?: string }>("/api/audit/reset-tamper", { method: "POST" });
       if (res.ok) {
         setTamperSimulated(false);
         setSuccess("Audit chain restored to pristine cryptographic state.");
         await fetchAuditStatus();
       } else {
-        setError(data.error || "Failed to reset chain.");
+        setError(res.error || "Failed to reset chain.");
       }
     } catch (err) {
       setError("Network failure during chain restoration.");
@@ -126,7 +134,7 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
     setReviewSubmitting(true);
     setError("");
     try {
-      const res = await fetch(`/api/security/alerts/${selectedAlert.id}/review`, {
+      const res = await safeFetchJson(`/api/security/alerts/${selectedAlert.id}/review`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -134,14 +142,13 @@ export default function SecurityPortal({ onBack }: SecurityPortalProps) {
           reviewedBy: "Alhaji Tunde Bakare (Chief Compliance Officer)",
         }),
       });
-      const data = await res.json();
       if (res.ok) {
         setSuccess(`Incident ${selectedAlert.id} investigated and adjudicated.`);
         setSelectedAlert(null);
         setReviewNotes("");
         fetchAlerts();
       } else {
-        setError(data.error || "Failed to save alert review.");
+        setError(res.error || "Failed to save alert review.");
       }
     } catch (err) {
       setError("Error submitting incident adjudication.");

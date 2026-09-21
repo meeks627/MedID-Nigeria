@@ -6,6 +6,7 @@ import {
   ArrowLeft, Search 
 } from "lucide-react";
 import { PatientProfile, AccessLog } from "../types";
+import { safeFetchJson } from "../utils/api";
 
 interface PatientPortalProps {
   onBack: () => void;
@@ -61,18 +62,17 @@ export default function PatientPortal({ onBack }: PatientPortalProps) {
       return;
     }
     try {
-      const response = await fetch("/api/patient/login", {
+      const res = await safeFetchJson<{ patient?: PatientProfile; accessHistory?: AccessLog[]; error?: string }>("/api/patient/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ medID: loginMedID.trim().toUpperCase(), pin: loginPin }),
       });
-      const data = await response.json();
-      if (!response.ok) {
-        setError(data.error || "Login failed.");
+      if (!res.ok || !res.data?.patient) {
+        setError(res.error || "Login failed.");
         return;
       }
-      setPatient(data.patient);
-      setAccessHistory(data.accessHistory);
+      setPatient(res.data.patient);
+      setAccessHistory(res.data.accessHistory || []);
       setViewMode("DASHBOARD");
     } catch (err) {
       console.error("Login error:", err);
@@ -95,7 +95,7 @@ export default function PatientPortal({ onBack }: PatientPortalProps) {
     }
 
     try {
-      const response = await fetch("/api/patient/register", {
+      const res = await safeFetchJson<{ medID?: string; notifications?: { email?: string; sms?: string }; error?: string }>("/api/patient/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -115,20 +115,19 @@ export default function PatientPortal({ onBack }: PatientPortalProps) {
         }),
       });
 
-      const data = await response.json();
-      if (!response.ok) {
-        setError(data.error || "Registration failed.");
+      if (!res.ok || !res.data?.medID) {
+        setError(res.error || "Registration failed.");
         return;
       }
 
-      setSuccessMsg(`Registration complete! Your secure National MedID is ${data.medID}`);
-      setLoginMedID(data.medID);
+      setSuccessMsg(`Registration complete! Your secure National MedID is ${res.data.medID}`);
+      setLoginMedID(res.data.medID);
       setLoginPin(regPin);
       
       // Keep simulation logs to display
-      if (data.notifications) {
+      if (res.data.notifications) {
         setSimulatedNotification(
-          `${data.notifications.email}\n\n${data.notifications.sms}`
+          `${res.data.notifications.email}\n\n${res.data.notifications.sms}`
         );
       }
       
@@ -150,20 +149,19 @@ export default function PatientPortal({ onBack }: PatientPortalProps) {
       return;
     }
     try {
-      const response = await fetch("/api/patient/recover", {
+      const res = await safeFetchJson<{ otpCode?: string; medID?: string; otpSimulatedNotification?: string; error?: string }>("/api/patient/recover", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ nin: recoverNin.trim() }),
       });
-      const data = await response.json();
-      if (!response.ok) {
-        setError(data.error || "Recovery failed.");
+      if (!res.ok || !res.data) {
+        setError(res.error || "Recovery failed.");
         return;
       }
-      setSimulatedOtp(data.otpCode);
-      setRecoveredMedID(data.medID);
+      setSimulatedOtp(res.data.otpCode || "");
+      setRecoveredMedID(res.data.medID || "");
       setOtpSent(true);
-      setSimulatedNotification(data.otpSimulatedNotification);
+      setSimulatedNotification(res.data.otpSimulatedNotification || null);
     } catch (err) {
       console.error("Recover error:", err);
       setError("Failed to reach server. Check that the API is reachable.");
