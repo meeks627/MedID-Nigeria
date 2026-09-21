@@ -29,6 +29,14 @@ const SEED_ALERTS: SecurityAlert[] = [
 
 export function loadAlerts(): void {
   try {
+    if (IS_VERCEL && !fs.existsSync(ALERTS_FILE_PATH)) {
+      const rootAlerts = path.join(process.cwd(), "medid-security-alerts.json");
+      if (fs.existsSync(rootAlerts)) {
+        const dir = path.dirname(ALERTS_FILE_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.copyFileSync(rootAlerts, ALERTS_FILE_PATH);
+      }
+    }
     if (fs.existsSync(ALERTS_FILE_PATH)) {
       alertsStore = JSON.parse(fs.readFileSync(ALERTS_FILE_PATH, "utf-8"));
     }

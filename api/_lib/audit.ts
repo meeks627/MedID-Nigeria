@@ -55,6 +55,14 @@ function computeEventHash(payload: Omit<AuditEvent, "currentHash">): string {
 
 export function loadAuditChain(): void {
   try {
+    if (IS_VERCEL && !fs.existsSync(AUDIT_FILE_PATH)) {
+      const rootAudit = path.join(process.cwd(), "medid-audit-chain.json");
+      if (fs.existsSync(rootAudit)) {
+        const dir = path.dirname(AUDIT_FILE_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.copyFileSync(rootAudit, AUDIT_FILE_PATH);
+      }
+    }
     if (fs.existsSync(AUDIT_FILE_PATH)) {
       const data = fs.readFileSync(AUDIT_FILE_PATH, "utf-8");
       auditChain = JSON.parse(data);
