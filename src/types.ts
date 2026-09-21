@@ -76,4 +76,79 @@ export interface AccessLog {
   status: "Approved" | "Active" | "Completed";
 }
 
-export type UserType = "PATIENT" | "DOCTOR" | "ADMIN" | null;
+export type UserType = "PATIENT" | "DOCTOR" | "ADMIN" | "SECURITY" | null;
+
+export type StaffRole = 
+  | "DOCTOR" 
+  | "NURSE" 
+  | "LAB_TECH"
+  | "PHARMACIST"
+  | "RECORDS_CLERK" 
+  | "HOSPITAL_ADMIN" 
+  | "SECURITY_ADMIN" 
+  | "PATIENT";
+
+export type DutyStatus = "ON_DUTY" | "OFF_DUTY";
+
+export interface StaffUser {
+  id: string;
+  name: string;
+  email: string;
+  role: StaffRole;
+  hospitalId: string;
+  hospitalName: string;
+  department: string;
+  ward?: string;
+  dutyStatus: DutyStatus;
+  licenseNumber?: string;
+  enabled: boolean;
+}
+
+export type RecordSection = 
+  | "IDENTITY_ADMIN" 
+  | "EMERGENCY_CRITICAL" 
+  | "ROUTINE_CLINICAL" 
+  | "LAB_PATHOLOGY"
+  | "PHARMACY_MAR"
+  | "HIGHLY_RESTRICTED";
+
+export interface SecurityAlert {
+  id: string;
+  timestamp: string;
+  ruleId: string;
+  severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  actorId: string;
+  actorName: string;
+  actorRole: StaffRole;
+  hospitalId: string;
+  patientMedID?: string;
+  description: string;
+  status: "PENDING_REVIEW" | "REVIEWED" | "DISMISSED";
+  reviewedBy?: string;
+  reviewNotes?: string;
+  reviewedAt?: string;
+}
+
+export interface AuditVerification {
+  valid: boolean;
+  totalEvents: number;
+  genesisHash: string;
+  headHash: string;
+  lastVerifiedAt: string;
+  tamperDetected: boolean;
+  tamperedIndex?: number;
+  tamperedEventId?: string;
+  failureReason?: string;
+  retentionPeriodDays: number;
+  independentCheckpointStatus: string;
+}
+
+export interface DowntimeState {
+  isOutageActive: boolean;
+  medIdCoreStatus: "ONLINE" | "DEGRADED" | "OFFLINE";
+  ehrAdapterStatus: "ONLINE" | "DEGRADED" | "OFFLINE";
+  ninProviderStatus: "ONLINE" | "DEGRADED" | "OFFLINE";
+  auditSinkStatus: "ONLINE" | "DEGRADED" | "OFFLINE";
+  queuedEventsCount: number;
+}
+

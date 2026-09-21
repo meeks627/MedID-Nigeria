@@ -5,6 +5,42 @@ import path from "path";
 import bcrypt from "bcryptjs";
 import { GoogleGenAI } from "@google/genai";
 
+import { StaffUser, DutyStatus, StaffRole, RecordSection } from "./types";
+import {
+  createSession,
+  getSession,
+  revokeSession,
+  updateDutyStatus,
+  findStaffByEmail,
+  findStaffById,
+  getStaffDirectory,
+  checkRateLimit,
+  addStaffUser,
+  SEED_STAFF_USERS,
+} from "./sessions";
+import { evaluateAccess, filterRecordsBySections } from "./policy";
+import {
+  recordAuditEvent,
+  getAuditEvents,
+  verifyAuditChain,
+  injectSyntheticTampering,
+  restoreAuditChain,
+  getRetentionPolicy,
+} from "./audit";
+import {
+  createSecurityAlert,
+  getSecurityAlerts,
+  reviewSecurityAlert,
+  triggerRuleAlert,
+} from "./abuse";
+import {
+  getDowntimeState,
+  setDowntimeOutage,
+  queueOfflineEvent,
+  reconcileOfflineEvents,
+  getQueuedEvents,
+} from "./downtime";
+
 // ─── Simple JSON File Database ───────────────────────────────────────────────
 const SALT_ROUNDS = 10;
 const IS_VERCEL = process.env.VERCEL === "1";
@@ -37,70 +73,184 @@ function loadDb(): void {
     if (fs.existsSync(DB_PATH)) {
       store = { ...defaultStore(), ...JSON.parse(fs.readFileSync(DB_PATH, "utf-8")) };
     }
-  } catch (e) { console.error("DB load:", e); }
+  } catch (e) {
+    console.error("DB load:", e);
+  }
 }
+
 function saveDb(): void {
   try {
     const dir = path.dirname(DB_PATH);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(DB_PATH, JSON.stringify(store), "utf-8");
-  } catch (e) { console.error("DB save:", e); }
+  } catch (e) {
+    console.error("DB save:", e);
+  }
 }
 
 // Password helpers
 const hashPw = (pw: string) => bcrypt.hashSync(pw, SALT_ROUNDS);
-const verifyPw = (pw: string, hash: string) => { try { return bcrypt.compareSync(pw, hash); } catch { return pw === hash; } };
+const verifyPw = (pw: string, hash: string) => {
+  try {
+    return bcrypt.compareSync(pw, hash);
+  } catch {
+    return pw === hash;
+  }
+};
 const hashPin = (pin: string) => bcrypt.hashSync(pin, SALT_ROUNDS);
-const verifyPin = (pin: string, hash: string) => { try { return bcrypt.compareSync(pin, hash); } catch { return pin === hash; } };
+const verifyPin = (pin: string, hash: string) => {
+  try {
+    return bcrypt.compareSync(pin, hash);
+  } catch {
+    return pin === hash;
+  }
+};
 
 // Admin passwords
-function setSeedAdminPw(id: string, pw: string) { if (!store.adminPasswords[id]) store.adminPasswords[id] = hashPw(pw); }
-function setAdminPw(id: string, pw: string) { store.adminPasswords[id] = hashPw(pw); saveDb(); }
-function getAdminPw(id: string) { return store.adminPasswords[id]; }
+function setSeedAdminPw(id: string, pw: string) {
+  if (!store.adminPasswords[id]) store.adminPasswords[id] = hashPw(pw);
+}
+function setAdminPw(id: string, pw: string) {
+  store.adminPasswords[id] = hashPw(pw);
+  saveDb();
+}
+function getAdminPw(id: string) {
+  return store.adminPasswords[id];
+}
 
 // Patient PINs
-function setPatientPin(medID: string, pin: string) { store.patientPins[medID] = hashPin(pin); saveDb(); }
-function getPatientPin(medID: string) { return store.patientPins[medID]; }
+function setPatientPin(medID: string, pin: string) {
+  store.patientPins[medID] = hashPin(pin);
+  saveDb();
+}
+function getPatientPin(medID: string) {
+  return store.patientPins[medID];
+}
 
 // Hospitals
-function getHospitals() { return store.hospitals; }
-function addHospital(h: any) { store.hospitals.push(h); saveDb(); }
-function findHospital(id: string) { return store.hospitals.find((h: any) => h.id === id); }
-function updateHospital(id: string, u: any) { const i = store.hospitals.findIndex((h: any) => h.id === id); if (i !== -1) { store.hospitals[i] = { ...store.hospitals[i], ...u }; saveDb(); } }
+function getHospitals() {
+  return store.hospitals;
+}
+function addHospital(h: any) {
+  store.hospitals.push(h);
+  saveDb();
+}
+function findHospital(id: string) {
+  return store.hospitals.find((h: any) => h.id === id);
+}
+function updateHospital(id: string, u: any) {
+  const i = store.hospitals.findIndex((h: any) => h.id === id);
+  if (i !== -1) {
+    store.hospitals[i] = { ...store.hospitals[i], ...u };
+    saveDb();
+  }
+}
 
 // Doctors
-function getDoctors() { return store.doctors; }
-function addDoctor(d: any) { store.doctors.push(d); saveDb(); }
-function findDoctor(id: string) { return store.doctors.find((d: any) => d.id === id); }
-function findDoctorByEmail(email: string) { return store.doctors.find((d: any) => d.email?.toLowerCase() === email.toLowerCase()); }
-function getDoctorsByHospital(hid: string) { return store.doctors.filter((d: any) => d.hospitalId === hid); }
-function toggleDoctor(id: string) { const d = store.doctors.find((d: any) => d.id === id); if (d) { d.enabled = !d.enabled; saveDb(); } return d; }
+function getDoctors() {
+  return store.doctors;
+}
+function addDoctor(d: any) {
+  store.doctors.push(d);
+  saveDb();
+}
+function findDoctor(id: string) {
+  return store.doctors.find((d: any) => d.id === id);
+}
+function findDoctorByEmail(email: string) {
+  return store.doctors.find((d: any) => d.email?.toLowerCase() === email.toLowerCase());
+}
+function getDoctorsByHospital(hid: string) {
+  return store.doctors.filter((d: any) => d.hospitalId === hid);
+}
+function toggleDoctor(id: string) {
+  const d = store.doctors.find((d: any) => d.id === id);
+  if (d) {
+    d.enabled = !d.enabled;
+    saveDb();
+  }
+  return d;
+}
 
 // Patients
-function getPatients() { return store.patients; }
-function addPatient(p: any) { store.patients.push(p); saveDb(); }
-function findPatient(medID: string) { return store.patients.find((p: any) => p.medID === medID); }
-function findPatientByNIN(nin: string) { return store.patients.find((p: any) => p.nin === nin); }
-function updatePatient(medID: string, u: any) { const i = store.patients.findIndex((p: any) => p.medID === medID); if (i !== -1) { store.patients[i] = { ...store.patients[i], ...u }; saveDb(); } }
-function getPatientsByHospital(hid: string) { return store.patients.filter((p: any) => p.linkedHospitals?.includes(hid)); }
+function getPatients() {
+  return store.patients;
+}
+function addPatient(p: any) {
+  store.patients.push(p);
+  saveDb();
+}
+function findPatient(medID: string) {
+  return store.patients.find((p: any) => p.medID === medID);
+}
+function findPatientByNIN(nin: string) {
+  return store.patients.find((p: any) => p.nin === nin);
+}
+function updatePatient(medID: string, u: any) {
+  const i = store.patients.findIndex((p: any) => p.medID === medID);
+  if (i !== -1) {
+    store.patients[i] = { ...store.patients[i], ...u };
+    saveDb();
+  }
+}
+function getPatientsByHospital(hid: string) {
+  return store.patients.filter((p: any) => p.linkedHospitals?.includes(hid));
+}
 
-// Logs
-function getLogs() { return store.logs; }
-function addLog(l: any) { store.logs.push(l); saveDb(); }
-function getLogsByHospital(hid: string) { return store.logs.filter((l: any) => l.hospital?.includes(hid) || l.hospitalId === hid); }
+// Logs (Legacy compatibility store)
+function getLogs() {
+  return store.logs;
+}
+function addLog(l: any) {
+  store.logs.push(l);
+  saveDb();
+}
+function getLogsByHospital(hid: string) {
+  return store.logs.filter((l: any) => l.hospital?.includes(hid) || l.hospitalId === hid);
+}
 
 // ID generators
-function nextHospitalId(): string { const n = store.counters.hospitalId++; saveDb(); return `HSP${String(n).padStart(6, "0")}`; }
-function nextDoctorId(): string { const n = store.counters.doctorId++; saveDb(); return `DOC${n}`; }
-function nextLogId(): string { const n = store.counters.logId++; saveDb(); return `LOG${n}`; }
-function nextMedID(): string { const n = store.counters.patientMedId++; saveDb(); return `MD${n}`; }
+function nextHospitalId(): string {
+  const n = store.counters.hospitalId++;
+  saveDb();
+  return `HSP${String(n).padStart(6, "0")}`;
+}
+function nextDoctorId(): string {
+  const n = store.counters.doctorId++;
+  saveDb();
+  return `DOC${n}`;
+}
+function nextLogId(): string {
+  const n = store.counters.logId++;
+  saveDb();
+  return `LOG${n}`;
+}
+function nextMedID(): string {
+  const n = store.counters.patientMedId++;
+  saveDb();
+  return `MD${n}`;
+}
 
 loadDb();
-
 dotenv.config();
 
 export const app = express();
 app.use(express.json());
+
+// Normalize URL if Vercel serverless function receives the rewritten path
+app.use((req, res, next) => {
+  const url = req.url || "";
+  const originalUrl = req.originalUrl || "";
+  const matchedPath = (req.headers["x-matched-path"] as string) || "";
+  if (!url.startsWith("/api")) {
+    if (originalUrl.startsWith("/api")) {
+      req.url = originalUrl;
+    } else if (matchedPath.startsWith("/api")) {
+      req.url = matchedPath;
+    }
+  }
+  next();
+});
 
 let ai: GoogleGenAI | null = null;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -120,7 +270,7 @@ if (GEMINI_API_KEY && GEMINI_API_KEY !== "MY_GEMINI_API_KEY") {
   }
 }
 
-interface Encounter {
+export interface Encounter {
   date: string;
   doctorName: string;
   department: string;
@@ -132,7 +282,7 @@ interface Encounter {
   summary: string;
 }
 
-interface HospitalEHR {
+export interface HospitalEHR {
   patients: {
     [medID: string]: {
       name: string;
@@ -143,7 +293,7 @@ interface HospitalEHR {
   };
 }
 
-const EHR_DATABASES: { [hospitalId: string]: HospitalEHR } = {
+export const EHR_DATABASES: { [hospitalId: string]: HospitalEHR } = {
   LUTH: {
     patients: {
       MD38281726: {
@@ -282,7 +432,7 @@ const EHR_DATABASES: { [hospitalId: string]: HospitalEHR } = {
   },
 };
 
-interface PatientProfile {
+export interface PatientProfile {
   medID: string;
   name: string;
   dob: string;
@@ -300,7 +450,7 @@ interface PatientProfile {
   linkedHospitals: string[];
 }
 
-const REGISTRY_PATIENTS: PatientProfile[] = [
+export const REGISTRY_PATIENTS: PatientProfile[] = [
   {
     medID: "MD38281726",
     name: "Sarah Johnson",
@@ -354,7 +504,7 @@ const REGISTRY_PATIENTS: PatientProfile[] = [
   },
 ];
 
-interface Doctor {
+export interface Doctor {
   id: string;
   name: string;
   email: string;
@@ -365,7 +515,7 @@ interface Doctor {
   enabled: boolean;
 }
 
-const REGISTRY_DOCTORS: Doctor[] = [
+export const REGISTRY_DOCTORS: Doctor[] = [
   {
     id: "DOC1",
     name: "Dr. James Bello",
@@ -398,7 +548,7 @@ const REGISTRY_DOCTORS: Doctor[] = [
   },
 ];
 
-interface HospitalProfile {
+export interface HospitalProfile {
   id: string;
   name: string;
   address: string;
@@ -406,7 +556,7 @@ interface HospitalProfile {
   codeGeneratedAt: Date;
 }
 
-const REGISTRY_HOSPITALS: HospitalProfile[] = [
+export const REGISTRY_HOSPITALS: HospitalProfile[] = [
   {
     id: "LUTH",
     name: "Lagos University Teaching Hospital (LUTH)",
@@ -430,7 +580,7 @@ const REGISTRY_HOSPITALS: HospitalProfile[] = [
   },
 ];
 
-interface AccessLog {
+export interface AccessLog {
   id: string;
   date: string;
   time: string;
@@ -444,7 +594,7 @@ interface AccessLog {
   status: "Approved" | "Active" | "Completed";
 }
 
-const AUDIT_LOGS: AccessLog[] = [
+export const AUDIT_LOGS: AccessLog[] = [
   {
     id: "LOG1",
     date: "12 July 2026",
@@ -509,43 +659,163 @@ AUDIT_LOGS.forEach((l) => {
   }
 });
 
-// Ensure counters are past seed data
-const maxDocNum = Math.max(...REGISTRY_DOCTORS.map((d) => parseInt(d.id.replace("DOC", "")) || 0));
-store.counters.doctorId = Math.max(store.counters.doctorId, maxDocNum + 1);
-store.counters.logId = Math.max(store.counters.logId, AUDIT_LOGS.length + 1);
-const maxMedNum = Math.max(...REGISTRY_PATIENTS.map((p) => parseInt(p.medID.replace("MD", "")) || 0));
-store.counters.patientMedId = Math.max(store.counters.patientMedId, maxMedNum + 1);
-saveDb();
+// Active emergency grants table (token -> grant)
+interface ActiveEmergencyGrant {
+  token: string;
+  doctorId: string;
+  patientMedID: string;
+  hospitalId: string;
+  reason: string;
+  expiresAt: number;
+  revoked: boolean;
+}
+const activeEmergencyGrants: Map<string, ActiveEmergencyGrant> = new Map();
 
-// Reload any data from disk that may have been persisted from previous sessions
-const persistedHospitals = getHospitals();
-persistedHospitals.forEach((h: any) => {
-  if (!REGISTRY_HOSPITALS.find((rh) => rh.id === h.id) && !REGISTRY_HOSPITALS.find((rh) => rh.id === h.id)) {
-    REGISTRY_HOSPITALS.push(h);
+/**
+ * Caller resolution helper
+ * Resolves session token from header, or falls back to staff lookup for legacy compatibility
+ */
+function resolveCaller(req: express.Request): StaffUser | null {
+  const authHeader = req.headers.authorization || req.headers["x-medid-session"];
+  if (typeof authHeader === "string") {
+    const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+    const sessionUser = getSession(token);
+    if (sessionUser) return sessionUser;
   }
-});
-const persistedPatients = getPatients();
-persistedPatients.forEach((p: any) => {
-  if (!REGISTRY_PATIENTS.find((rp) => rp.medID === p.medID)) {
-    REGISTRY_PATIENTS.push(p);
-  }
-});
-const persistedDoctors = getDoctors();
-persistedDoctors.forEach((d: any) => {
-  if (!REGISTRY_DOCTORS.find((rd) => rd.id === d.id)) {
-    REGISTRY_DOCTORS.push(d);
-  }
-});
-const persistedLogs = getLogs();
-persistedLogs.forEach((l: any) => {
-  if (!AUDIT_LOGS.find((rl) => rl.id === l.id)) {
-    AUDIT_LOGS.push(l);
-  }
-});
 
+  // Fallback: check query or body for doctorId or email
+  const doctorId = req.body?.doctorId || req.query?.doctorId;
+  if (typeof doctorId === "string") {
+    const staff = findStaffById(doctorId);
+    if (staff) return staff;
+  }
+
+  const email = req.body?.email || req.query?.email;
+  if (typeof email === "string") {
+    const staff = findStaffByEmail(email);
+    if (staff) return staff;
+  }
+
+  return null;
+}
+
+// ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok" });
+  const downtime = getDowntimeState();
+  res.json({
+    status: downtime.isOutageActive ? "degraded" : "ok",
+    downtime,
+  });
 });
+
+// ─── CENTRAL AUTHENTICATION & SESSION ENDPOINTS ──────────────────────────────
+
+app.get("/api/auth/directory", (req, res) => {
+  const directory = getStaffDirectory();
+  res.json(directory);
+});
+
+app.post("/api/auth/staff-login", (req, res) => {
+  const { email, licenseOrPassword } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: "Email address is required." });
+  }
+
+  // Rate-limiting brute force protection
+  const allowed = checkRateLimit(`login_${email.toLowerCase()}`, 5, 60000);
+  if (!allowed) {
+    return res.status(429).json({ error: "Too many failed attempts. Account rate-limited for 60 seconds." });
+  }
+
+  const staff = findStaffByEmail(email);
+  if (!staff) {
+    // Generic error message to prevent account enumeration
+    return res.status(401).json({ error: "Invalid credentials." });
+  }
+
+  if (!staff.enabled) {
+    recordAuditEvent({
+      eventType: "AUTHENTICATION_BLOCKED",
+      actorId: staff.id,
+      actorName: staff.name,
+      actorRole: staff.role,
+      hospitalId: staff.hospitalId,
+      action: "STAFF_LOGIN",
+      resource: "AUTH_SERVICE",
+      decision: "DENY",
+      purpose: "Login attempt on disabled account",
+    });
+    return res.status(403).json({ error: "Account has been deactivated by hospital administrator." });
+  }
+
+  const sessionToken = createSession(staff);
+
+  recordAuditEvent({
+    eventType: "STAFF_AUTHENTICATION_SUCCESS",
+    actorId: staff.id,
+    actorName: staff.name,
+    actorRole: staff.role,
+    hospitalId: staff.hospitalId,
+    action: "STAFF_LOGIN",
+    resource: "AUTH_SERVICE",
+    decision: "ALLOW",
+    purpose: "Staff login session established",
+  });
+
+  res.json({
+    success: true,
+    sessionToken,
+    user: staff,
+  });
+});
+
+app.get("/api/auth/session", (req, res) => {
+  const caller = resolveCaller(req);
+  if (!caller) {
+    return res.status(401).json({ error: "No active session or session expired." });
+  }
+  res.json({ success: true, user: caller });
+});
+
+app.post("/api/auth/toggle-duty", (req, res) => {
+  const caller = resolveCaller(req);
+  if (!caller) {
+    return res.status(401).json({ error: "Unauthorized." });
+  }
+
+  const { dutyStatus } = req.body;
+  if (dutyStatus !== "ON_DUTY" && dutyStatus !== "OFF_DUTY") {
+    return res.status(400).json({ error: "Invalid duty status. Must be ON_DUTY or OFF_DUTY." });
+  }
+
+  const updated = updateDutyStatus(caller.id, dutyStatus);
+
+  recordAuditEvent({
+    eventType: "DUTY_STATUS_CHANGED",
+    actorId: caller.id,
+    actorName: caller.name,
+    actorRole: caller.role,
+    hospitalId: caller.hospitalId,
+    action: "TOGGLE_DUTY",
+    resource: "STAFF_PROFILE",
+    decision: "ALLOW",
+    purpose: `Staff changed duty status to ${dutyStatus}`,
+  });
+
+  res.json({ success: true, user: updated });
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  const authHeader = req.headers.authorization || req.headers["x-medid-session"];
+  if (typeof authHeader === "string") {
+    const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+    revokeSession(token);
+  }
+  res.json({ success: true, message: "Session successfully terminated." });
+});
+
+// ─── PATIENT REGISTRATION & AUTHENTICATION ───────────────────────────────────
 
 app.post("/api/patient/register", (req, res) => {
   const { name, dob, gender, phone, email, address, nin, pin, emergencyContact } = req.body;
@@ -578,12 +848,25 @@ app.post("/api/patient/register", (req, res) => {
   addPatient(newPatient);
   setPatientPin(medID, pin || "1234");
 
+  recordAuditEvent({
+    eventType: "PATIENT_REGISTRATION",
+    actorId: medID,
+    actorName: name,
+    actorRole: "PATIENT",
+    hospitalId: "FED_MOH_NIGERIA",
+    patientMedID: medID,
+    action: "REGISTER_PATIENT",
+    resource: "PATIENT_IDENTITY_REGISTRY",
+    decision: "ALLOW",
+    purpose: "National Medical ID generated via verified NIN simulation",
+  });
+
   res.json({
     success: true,
     medID,
     patient: newPatient,
     notifications: {
-      email: `[SIMULATED EMAIL SENT to ${email}]: Welcome to MedID. Your secure National Healthcare Identity Number is ${medID}. Keeps this safe.`,
+      email: `[SIMULATED EMAIL SENT to ${email}]: Welcome to MedID. Your secure National Healthcare Identity Number is ${medID}. Keep this safe.`,
       sms: `[SIMULATED SMS SENT to ${phone}]: MedID Registration Complete. ID: ${medID}. Access history is verifiable at any time.`,
     },
   });
@@ -614,15 +897,29 @@ app.post("/api/patient/login", (req, res) => {
   const { medID, pin } = req.body;
   const patient = findPatient(medID);
   if (!patient) {
-    return res.status(404).json({ error: "MedID not found." });
+    return res.status(401).json({ error: "Invalid Medical ID or PIN." });
   }
 
   const storedHash = getPatientPin(medID);
   if (!storedHash || !verifyPin(pin, storedHash)) {
-    return res.status(401).json({ error: "Invalid PIN." });
+    return res.status(401).json({ error: "Invalid Medical ID or PIN." });
   }
 
-  const logs = AUDIT_LOGS.filter((l) => l.patientMedID === medID);
+  const logs = getAuditEvents({ patientMedID: medID });
+
+  recordAuditEvent({
+    eventType: "PATIENT_LOGIN",
+    actorId: patient.medID,
+    actorName: patient.name,
+    actorRole: "PATIENT",
+    hospitalId: "FED_MOH_NIGERIA",
+    patientMedID: patient.medID,
+    action: "PATIENT_LOGIN",
+    resource: "PATIENT_PORTAL",
+    decision: "ALLOW",
+    purpose: "Patient verified access to identity card and access audit history",
+  });
+
   res.json({
     success: true,
     patient: {
@@ -639,12 +936,14 @@ app.post("/api/patient/login", (req, res) => {
   });
 });
 
+// ─── DOCTOR & ADMIN LEGACY LOGIN WITH SESSION AUTO-PROVISIONING ──────────────
+
 app.post("/api/doctor/login", (req, res) => {
   const { email, licenseNumber } = req.body;
   const doctor = findDoctorByEmail(email);
 
   if (!doctor) {
-    return res.status(404).json({ error: "Doctor credentials not found." });
+    return res.status(401).json({ error: "Invalid clinical credentials." });
   }
 
   if (!doctor.enabled) {
@@ -653,8 +952,42 @@ app.post("/api/doctor/login", (req, res) => {
 
   const hospital = findHospital(doctor.hospitalId);
 
+  // Auto-provision session token
+  let staff = findStaffByEmail(email);
+  if (!staff) {
+    staff = {
+      id: doctor.id,
+      name: doctor.name,
+      email: doctor.email,
+      role: "DOCTOR",
+      hospitalId: doctor.hospitalId,
+      hospitalName: hospital ? hospital.name : doctor.hospitalId,
+      department: doctor.department || "Internal Medicine",
+      ward: "General Ward",
+      dutyStatus: "ON_DUTY",
+      licenseNumber: doctor.licenseNumber,
+      enabled: true,
+    };
+    addStaffUser(staff);
+  }
+
+  const sessionToken = createSession(staff);
+
+  recordAuditEvent({
+    eventType: "DOCTOR_LOGIN",
+    actorId: doctor.id,
+    actorName: doctor.name,
+    actorRole: "DOCTOR",
+    hospitalId: doctor.hospitalId,
+    action: "LOGIN",
+    resource: "CLINICIAN_PORTAL",
+    decision: "ALLOW",
+    purpose: "Doctor logged in for clinical duty",
+  });
+
   res.json({
     success: true,
+    sessionToken,
     doctor: {
       id: doctor.id,
       name: doctor.name,
@@ -664,6 +997,7 @@ app.post("/api/doctor/login", (req, res) => {
       department: doctor.department,
       hospitalId: doctor.hospitalId,
       hospitalName: hospital ? hospital.name : doctor.hospitalId,
+      dutyStatus: staff.dutyStatus,
     },
   });
 });
@@ -672,7 +1006,7 @@ app.post("/api/admin/login", (req, res) => {
   const { hospitalId, password } = req.body;
   const hospital = findHospital(hospitalId);
   if (!hospital) {
-    return res.status(404).json({ error: "Hospital not registered on MedID platform." });
+    return res.status(401).json({ error: "Invalid Hospital Administrator credentials." });
   }
 
   const storedHash = getAdminPw(hospitalId);
@@ -680,8 +1014,40 @@ app.post("/api/admin/login", (req, res) => {
     return res.status(401).json({ error: "Invalid Hospital Administrator credentials." });
   }
 
+  // Provision admin session
+  let adminStaff = findStaffByEmail(`admin@${hospitalId.toLowerCase()}.org`);
+  if (!adminStaff) {
+    adminStaff = {
+      id: `ADMIN-${hospitalId}`,
+      name: `${hospital.name} Admin`,
+      email: `admin@${hospitalId.toLowerCase()}.org`,
+      role: "HOSPITAL_ADMIN",
+      hospitalId: hospital.id,
+      hospitalName: hospital.name,
+      department: "Hospital Administration",
+      dutyStatus: "ON_DUTY",
+      enabled: true,
+    };
+    addStaffUser(adminStaff);
+  }
+
+  const sessionToken = createSession(adminStaff);
+
+  recordAuditEvent({
+    eventType: "HOSPITAL_ADMIN_LOGIN",
+    actorId: adminStaff.id,
+    actorName: adminStaff.name,
+    actorRole: "HOSPITAL_ADMIN",
+    hospitalId: hospital.id,
+    action: "LOGIN",
+    resource: "ADMIN_PORTAL",
+    decision: "ALLOW",
+    purpose: "Hospital Administrator signed in",
+  });
+
   res.json({
     success: true,
+    sessionToken,
     hospital: {
       id: hospital.id,
       name: hospital.name,
@@ -717,11 +1083,10 @@ app.post("/api/admin/register", (req, res) => {
   }
 
   const hospitalId = nextHospitalId();
-
   const randomDigits = Math.floor(1000 + Math.random() * 9000);
   const emergencyCode = `MDEM-${randomDigits}`;
-
   const fullAddress = `${address || ""}, ${city || ""}, ${state || ""}, ${country || "Nigeria"}`;
+
   const newHospital: any = {
     id: hospitalId,
     name: hospitalName,
@@ -739,9 +1104,19 @@ app.post("/api/admin/register", (req, res) => {
 
   addHospital(newHospital);
   setAdminPw(hospitalId, password);
-
-  // Also sync to in-memory arrays for backward compat
   REGISTRY_HOSPITALS.push(newHospital);
+
+  recordAuditEvent({
+    eventType: "HOSPITAL_REGISTERED",
+    actorId: hospitalId,
+    actorName: adminName,
+    actorRole: "HOSPITAL_ADMIN",
+    hospitalId,
+    action: "REGISTER_HOSPITAL",
+    resource: "HOSPITAL_REGISTRY",
+    decision: "ALLOW",
+    purpose: `New hospital onboarded: ${hospitalName} (${registrationNumber})`,
+  });
 
   res.json({
     success: true,
@@ -779,6 +1154,33 @@ app.post("/api/admin/:hospitalId/doctors/register", (req, res) => {
 
   addDoctor(newDoc);
   REGISTRY_DOCTORS.push(newDoc);
+
+  // Sync to staff directory
+  addStaffUser({
+    id: newDoc.id,
+    name: newDoc.name,
+    email: newDoc.email,
+    role: "DOCTOR",
+    hospitalId: newDoc.hospitalId,
+    hospitalName: findHospital(hospitalId)?.name || hospitalId,
+    department: newDoc.department,
+    dutyStatus: "ON_DUTY",
+    licenseNumber: newDoc.licenseNumber,
+    enabled: true,
+  });
+
+  recordAuditEvent({
+    eventType: "CLINICIAN_REGISTERED",
+    actorId: hospitalId,
+    actorName: "Hospital Administrator",
+    actorRole: "HOSPITAL_ADMIN",
+    hospitalId,
+    action: "REGISTER_DOCTOR",
+    resource: "CLINICIAN_DIRECTORY",
+    decision: "ALLOW",
+    purpose: `Doctor registered: ${newDoc.name} (${newDoc.licenseNumber})`,
+  });
+
   res.json({ success: true, doctor: newDoc });
 });
 
@@ -788,8 +1190,25 @@ app.post("/api/admin/doctors/toggle", (req, res) => {
   if (!doc) {
     return res.status(404).json({ error: "Doctor not found." });
   }
+
   const inMemDoc = REGISTRY_DOCTORS.find((d) => d.id === doctorId);
   if (inMemDoc) inMemDoc.enabled = doc.enabled;
+
+  const staff = findStaffById(doctorId);
+  if (staff) staff.enabled = doc.enabled;
+
+  recordAuditEvent({
+    eventType: "CLINICIAN_ACCOUNT_TOGGLED",
+    actorId: doc.hospitalId,
+    actorName: "Hospital Administrator",
+    actorRole: "HOSPITAL_ADMIN",
+    hospitalId: doc.hospitalId,
+    action: "TOGGLE_STAFF_STATUS",
+    resource: "CLINICIAN_DIRECTORY",
+    decision: "ALLOW",
+    purpose: `Doctor ${doc.name} account active status set to: ${doc.enabled}`,
+  });
+
   res.json({ success: true, enabled: doc.enabled, doctor: doc });
 });
 
@@ -814,6 +1233,18 @@ app.post("/api/admin/:hospitalId/emergency-code/rotate", (req, res) => {
     inMemHospital.codeGeneratedAt = new Date();
   }
 
+  recordAuditEvent({
+    eventType: "EMERGENCY_KEY_ROTATED",
+    actorId: hospitalId,
+    actorName: "Hospital Administrator",
+    actorRole: "HOSPITAL_ADMIN",
+    hospitalId,
+    action: "ROTATE_EMERGENCY_CODE",
+    resource: "SECURITY_CREDENTIALS",
+    decision: "ALLOW",
+    purpose: "Hospital emergency override code was refreshed",
+  });
+
   res.json({
     success: true,
     emergencyOverrideCode: newCode,
@@ -837,19 +1268,50 @@ app.get("/api/admin/:hospitalId/logs", (req, res) => {
   if (!hospital) {
     return res.status(404).json({ error: "Hospital not found." });
   }
-  const logs = getLogsByHospital(hospitalId);
-  if (logs.length === 0) {
-    const inMemLogs = AUDIT_LOGS.filter((l) => l.hospital.includes(hospitalId) || l.hospital === hospital.name);
-    res.json(inMemLogs);
-  } else {
-    res.json(logs);
-  }
+  const logs = getAuditEvents({ hospitalId });
+  res.json(logs);
 });
+
+// ─── RECORD DISCOVERY & CENTRAL ACCESS POLICY ENFORCEMENT ───────────────────
 
 app.get("/api/doctor/search-patient", (req, res) => {
   const { medID } = req.query;
   if (!medID) {
     return res.status(400).json({ error: "MedID is required." });
+  }
+
+  const downtime = getDowntimeState();
+  if (downtime.isOutageActive && downtime.ninProviderStatus === "OFFLINE") {
+    return res.status(503).json({
+      error: "DOWNTIME ACTIVE: National Identity directory is offline. Refer to local hospital paper emergency protocol.",
+      downtimeActive: true,
+    });
+  }
+
+  const caller = resolveCaller(req) || SEED_STAFF_USERS[0]; // default to Dr. Bello if no session provided
+
+  // Evaluate Central Policy
+  const policy = evaluateAccess({
+    subject: caller,
+    action: "SEARCH_PATIENT",
+    resource: "PATIENT_INDEX",
+    patientMedID: medID.toString().trim(),
+  });
+
+  if (policy.decision === "DENY") {
+    recordAuditEvent({
+      eventType: "PATIENT_SEARCH_DENIED",
+      actorId: caller.id,
+      actorName: caller.name,
+      actorRole: caller.role,
+      hospitalId: caller.hospitalId,
+      patientMedID: medID.toString().trim(),
+      action: "SEARCH_PATIENT",
+      resource: "PATIENT_DIRECTORY",
+      decision: "DENY",
+      purpose: policy.reason,
+    });
+    return res.status(403).json({ error: policy.reason });
   }
 
   const patient = findPatient(medID.toString().trim());
@@ -860,6 +1322,20 @@ app.get("/api/doctor/search-patient", (req, res) => {
   const recordsAvailable: { [hospitalId: string]: boolean } = {};
   Object.keys(EHR_DATABASES).forEach((hosp) => {
     recordsAvailable[hosp] = EHR_DATABASES[hosp].patients[patient.medID] !== undefined;
+  });
+
+  recordAuditEvent({
+    eventType: "PATIENT_INDEX_SEARCH",
+    actorId: caller.id,
+    actorName: caller.name,
+    actorRole: caller.role,
+    hospitalId: caller.hospitalId,
+    patientMedID: patient.medID,
+    action: "SEARCH_PATIENT",
+    resource: "PATIENT_INDEX",
+    decision: "ALLOW",
+    accessScope: policy.permittedSections,
+    purpose: "Patient discovery query",
   });
 
   res.json({
@@ -874,8 +1350,22 @@ app.get("/api/doctor/search-patient", (req, res) => {
 app.post("/api/doctor/retrieve-records", (req, res) => {
   const { medID, doctorId, purpose } = req.body;
 
-  if (!medID || !doctorId) {
-    return res.status(400).json({ error: "Missing required query parameters." });
+  if (!medID) {
+    return res.status(400).json({ error: "Missing required Patient MedID." });
+  }
+
+  // Downtime Mode check
+  const downtime = getDowntimeState();
+  if (downtime.isOutageActive) {
+    return res.status(503).json({
+      error: "DOWNTIME MODE ACTIVE: Hospital Record Adapter is currently offline. Remote EHR record access is disabled. Please consult manual paper Emergency Chart (Form MD-DT-01).",
+      downtimeActive: true,
+    });
+  }
+
+  const caller = resolveCaller(req);
+  if (!caller) {
+    return res.status(401).json({ error: "Authentication required. Active staff session token missing or invalid." });
   }
 
   const patient = findPatient(medID);
@@ -883,32 +1373,86 @@ app.post("/api/doctor/retrieve-records", (req, res) => {
     return res.status(404).json({ error: "Patient not found." });
   }
 
-  const doctor = findDoctor(doctorId);
-  if (!doctor) {
-    return res.status(404).json({ error: "Doctor authentication invalid." });
+  // CENTRAL POLICY ENFORCEMENT POINT (PEP)
+  const policy = evaluateAccess({
+    subject: caller,
+    action: "RETRIEVE_RECORDS",
+    resource: "PATIENT_EHR",
+    patientMedID: medID,
+    purpose: purpose || "Routine Consultation",
+    requestedSections: ["IDENTITY_ADMIN", "EMERGENCY_CRITICAL", "ROUTINE_CLINICAL"],
+  });
+
+  // If access is DENIED: record audit event and trigger real-time abuse alert
+  if (policy.decision === "DENY") {
+    recordAuditEvent({
+      eventType: "UNAUTHORIZED_RECORD_ACCESS_DENIED",
+      actorId: caller.id,
+      actorName: caller.name,
+      actorRole: caller.role,
+      hospitalId: caller.hospitalId,
+      patientMedID: patient.medID,
+      action: "RETRIEVE_RECORDS",
+      resource: "CLINICAL_EHR_CHART",
+      decision: "DENY",
+      purpose: purpose || "Unauthorized access attempt",
+    });
+
+    if (policy.alertTrigger) {
+      triggerRuleAlert(policy.alertTrigger, {
+        actorId: caller.id,
+        actorName: caller.name,
+        actorRole: caller.role,
+        hospitalId: caller.hospitalId,
+        patientMedID: patient.medID,
+      });
+    }
+
+    return res.status(403).json({
+      error: policy.reason,
+      decision: "DENY",
+      alertTrigger: policy.alertTrigger,
+      role: caller.role,
+    });
   }
 
-  const hospital = findHospital(doctor.hospitalId);
-
-  const retrievedRecords: { [hospitalName: string]: Encounter[] } = {};
+  // Access is ALLOWED: pull hospital records and filter by permitted sections
+  const retrievedRecordsRaw: { [hospitalName: string]: Encounter[] } = {};
   Object.keys(EHR_DATABASES).forEach((hospId) => {
     const hospRecord = EHR_DATABASES[hospId].patients[medID];
     if (hospRecord) {
       const hospitalName = getHospitals().find((h: any) => h.id === hospId)?.name || hospId;
-      retrievedRecords[hospitalName] = hospRecord.encounters;
+      retrievedRecordsRaw[hospitalName] = hospRecord.encounters;
     }
   });
 
+  const filteredRecords = filterRecordsBySections(retrievedRecordsRaw, policy.permittedSections);
+
+  // Cryptographic audit chain append
+  const auditEvt = recordAuditEvent({
+    eventType: "CLINICAL_RECORDS_RETRIEVED",
+    actorId: caller.id,
+    actorName: caller.name,
+    actorRole: caller.role,
+    hospitalId: caller.hospitalId,
+    patientMedID: patient.medID,
+    action: "RETRIEVE_RECORDS",
+    resource: "CLINICAL_EHR_CHART",
+    decision: "ALLOW",
+    accessScope: policy.permittedSections,
+    purpose: purpose || "Routine Consultation",
+  });
+
+  // Legacy sync
   const now = new Date();
   const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const dateStr = now.toLocaleDateString([], { day: "numeric", month: "long", year: "numeric" });
-
   const newLog: AccessLog = {
     id: nextLogId(),
     date: dateStr,
     time: timeStr,
-    hospital: hospital ? hospital.name : doctor.hospitalId,
-    doctor: doctor.name,
+    hospital: caller.hospitalName,
+    doctor: caller.name,
     patientName: patient.name,
     patientMedID: patient.medID,
     purpose: purpose || "Routine Consultation",
@@ -917,12 +1461,6 @@ app.post("/api/doctor/retrieve-records", (req, res) => {
     status: "Completed",
   };
   addLog(newLog);
-  AUDIT_LOGS.push(newLog);
-
-  if (hospital && !patient.linkedHospitals.includes(hospital.id)) {
-    patient.linkedHospitals.push(hospital.id);
-    updatePatient(medID, { linkedHospitals: patient.linkedHospitals });
-  }
 
   res.json({
     success: true,
@@ -933,12 +1471,18 @@ app.post("/api/doctor/retrieve-records", (req, res) => {
       gender: patient.gender,
       emergencyContact: patient.emergencyContact,
     },
-    retrievedRecords,
+    retrievedRecords: filteredRecords,
+    permittedSections: policy.permittedSections,
+    auditEventId: auditEvt.id,
   });
 });
 
+// ─── GOVERNED BREAK-GLASS EMERGENCY WORKFLOW ─────────────────────────────────
+
 app.post("/api/doctor/emergency-biometric-match", (req, res) => {
-  const { biometricType, scanData, reason, doctorId } = req.body;
+  const { scanData, reason } = req.body;
+  const caller = resolveCaller(req) || SEED_STAFF_USERS[0];
+
   const allPatients = getPatients();
   let selectedPatient = allPatients[0] || REGISTRY_PATIENTS[0];
   if (scanData === "fingerprint_david") {
@@ -947,38 +1491,69 @@ app.post("/api/doctor/emergency-biometric-match", (req, res) => {
     selectedPatient = allPatients.find((p: any) => p.medID === "MD44118822") || REGISTRY_PATIENTS[2];
   }
 
+  const emergencyToken = `EMERGENCY-TOKEN-${Math.floor(100000 + Math.random() * 900000)}`;
+
   res.json({
     success: true,
-    message: "Biometric NIN simulation successful.",
+    message: "Simulated biometric match verified against national NIN registry.",
     patientMatched: {
       medID: selectedPatient.medID,
       name: selectedPatient.name,
       dob: selectedPatient.dob,
       gender: selectedPatient.gender,
     },
-    emergencyToken: `EMERGENCY-TOKEN-${Math.floor(100000 + Math.random() * 900000)}`,
+    emergencyToken,
   });
 });
 
 app.post("/api/doctor/emergency-retrieve", (req, res) => {
   const { emergencyToken, emergencyOverrideCode, reason, medID, doctorId } = req.body;
 
-  if (!emergencyOverrideCode || !medID || !doctorId) {
+  if (!emergencyOverrideCode || !medID) {
     return res.status(400).json({ error: "Missing emergency credentials or Patient MedID." });
   }
 
-  const doctor = findDoctor(doctorId);
-  if (!doctor) {
-    return res.status(404).json({ error: "Doctor credentials invalid." });
+  if (!reason || reason.trim().length < 5) {
+    return res.status(400).json({ error: "Mandatory emergency justification reason required (min 5 characters)." });
   }
 
-  const hospital = findHospital(doctor.hospitalId);
+  const caller = resolveCaller(req) || (doctorId ? findStaffById(doctorId) : null);
+  if (!caller) {
+    return res.status(401).json({ error: "Clinician authentication invalid." });
+  }
+
+  const hospital = findHospital(caller.hospitalId);
   if (!hospital) {
     return res.status(404).json({ error: "Hospital admin profile missing." });
   }
 
-  if (hospital.emergencyOverrideCode !== emergencyOverrideCode) {
-    return res.status(401).json({ error: "Invalid Hospital Emergency Override Code. Please consult your Hospital Admin." });
+  // Rate limiting on emergency attempts to prevent brute force
+  const allowed = checkRateLimit(`emergency_${caller.hospitalId}`, 4, 60000);
+  if (!allowed) {
+    triggerRuleAlert("RULE_REPEATED_EMERGENCY_FAILURES", {
+      actorId: caller.id,
+      actorName: caller.name,
+      actorRole: caller.role,
+      hospitalId: caller.hospitalId,
+      customMsg: "Excessive emergency override attempts detected. Rate limit engaged.",
+    });
+    return res.status(429).json({ error: "Excessive emergency attempts. System temporarily locked for safety." });
+  }
+
+  if (hospital.emergencyOverrideCode !== emergencyOverrideCode.trim()) {
+    recordAuditEvent({
+      eventType: "EMERGENCY_OVERRIDE_FAILED",
+      actorId: caller.id,
+      actorName: caller.name,
+      actorRole: caller.role,
+      hospitalId: hospital.id,
+      patientMedID: medID,
+      action: "EMERGENCY_OVERRIDE",
+      resource: "EMERGENCY_RECORDS",
+      decision: "DENY",
+      purpose: `Invalid hospital emergency code attempt. Reason provided: ${reason}`,
+    });
+    return res.status(401).json({ error: "Invalid Hospital Emergency Override Code." });
   }
 
   const patient = findPatient(medID);
@@ -986,34 +1561,71 @@ app.post("/api/doctor/emergency-retrieve", (req, res) => {
     return res.status(404).json({ error: "Patient MedID invalid." });
   }
 
-  const retrievedRecords: { [hospitalName: string]: Encounter[] } = {};
+  // Evaluate Emergency Policy
+  const policy = evaluateAccess({
+    subject: caller,
+    action: "EMERGENCY_OVERRIDE",
+    resource: "EMERGENCY_RECORDS",
+    patientMedID: medID,
+    purpose: reason,
+    emergencyToken,
+  });
+
+  if (policy.decision === "DENY") {
+    return res.status(403).json({ error: policy.reason });
+  }
+
+  // 1-Minute (60s) Time-Limited Emergency Access Window
+  const durationSeconds = 60;
+  const durationMinutes = 1;
+  const expiresAt = Date.now() + durationSeconds * 1000;
+  activeEmergencyGrants.set(emergencyToken, {
+    token: emergencyToken,
+    doctorId: caller.id,
+    patientMedID: medID,
+    hospitalId: hospital.id,
+    reason,
+    expiresAt,
+    revoked: false,
+  });
+
+  // Pull raw records and strictly filter down to EMERGENCY-CRITICAL sections
+  const rawRecords: { [hospitalName: string]: Encounter[] } = {};
   Object.keys(EHR_DATABASES).forEach((hospId) => {
     const hospRecord = EHR_DATABASES[hospId].patients[medID];
     if (hospRecord) {
       const hospitalName = getHospitals().find((h: any) => h.id === hospId)?.name || hospId;
-      retrievedRecords[hospitalName] = hospRecord.encounters;
+      rawRecords[hospitalName] = hospRecord.encounters;
     }
   });
 
-  const now = new Date();
-  const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const dateStr = now.toLocaleDateString([], { day: "numeric", month: "long", year: "numeric" });
+  // Filter to Emergency Scope: Allergy, Critical Alerts, Emergency Meds
+  const emergencyScopedRecords = filterRecordsBySections(rawRecords, ["IDENTITY_ADMIN", "EMERGENCY_CRITICAL"]);
 
-  const emergencyLog: AccessLog = {
-    id: nextLogId(),
-    date: dateStr,
-    time: timeStr,
-    hospital: hospital.name,
-    doctor: doctor.name,
-    patientName: patient.name,
+  // Record Unavoidable Cryptographic Audit Block
+  const auditEvt = recordAuditEvent({
+    eventType: "EMERGENCY_BREAK_GLASS_ACCESS",
+    actorId: caller.id,
+    actorName: caller.name,
+    actorRole: caller.role,
+    hospitalId: hospital.id,
     patientMedID: patient.medID,
-    purpose: `EMERGENCY OVERRIDE: ${reason || "Unconscious patient rescue"}`,
-    accessType: "Emergency Access",
-    duration: "15 minutes",
-    status: "Completed",
-  };
-  addLog(emergencyLog);
-  AUDIT_LOGS.push(emergencyLog);
+    action: "EMERGENCY_OVERRIDE",
+    resource: "EMERGENCY_CHART",
+    decision: "ALLOW",
+    accessScope: ["IDENTITY_ADMIN", "EMERGENCY_CRITICAL"],
+    purpose: `EMERGENCY DECLARATION: ${reason} (Authorized 1-minute window)`,
+  });
+
+  // Create High-Priority Security Alert for mandatory review
+  triggerRuleAlert("RULE_EMERGENCY_OVERRIDE", {
+    actorId: caller.id,
+    actorName: caller.name,
+    actorRole: caller.role,
+    hospitalId: hospital.id,
+    patientMedID: patient.medID,
+    customMsg: reason,
+  });
 
   res.json({
     success: true,
@@ -1024,9 +1636,155 @@ app.post("/api/doctor/emergency-retrieve", (req, res) => {
       gender: patient.gender,
       emergencyContact: patient.emergencyContact,
     },
-    retrievedRecords,
+    retrievedRecords: emergencyScopedRecords,
+    permittedSections: ["IDENTITY_ADMIN", "EMERGENCY_CRITICAL"],
+    emergencyAccessGrant: {
+      token: emergencyToken,
+      expiresAt: new Date(expiresAt).toISOString(),
+      durationMinutes: 1,
+      durationSeconds: 60,
+      auditEventId: auditEvt.id,
+    },
   });
 });
+
+app.post("/api/doctor/emergency-revoke", (req, res) => {
+  const { emergencyToken } = req.body;
+  const grant = activeEmergencyGrants.get(emergencyToken);
+  if (grant) {
+    grant.revoked = true;
+    activeEmergencyGrants.delete(emergencyToken);
+  }
+  res.json({ success: true, message: "Emergency access grant explicitly revoked." });
+});
+
+// ─── TAMPER-EVIDENT AUDIT & SECURITY ENDPOINTS ───────────────────────────────
+
+app.get("/api/audit/logs", (req, res) => {
+  const { hospitalId, patientMedID } = req.query;
+  const logs = getAuditEvents({
+    hospitalId: typeof hospitalId === "string" ? hospitalId : undefined,
+    patientMedID: typeof patientMedID === "string" ? patientMedID : undefined,
+  });
+  res.json(logs);
+});
+
+app.get("/api/audit/verify", (req, res) => {
+  const result = verifyAuditChain();
+  if (result.tamperDetected) {
+    triggerRuleAlert("RULE_TAMPER_DETECTED", {
+      actorId: "AUDIT_MONITOR",
+      actorName: "Cryptographic Verification Engine",
+      actorRole: "SECURITY_ADMIN",
+      hospitalId: "LUTH",
+    });
+  }
+  res.json(result);
+});
+
+app.post("/api/audit/tamper-demo", (req, res) => {
+  const tampered = injectSyntheticTampering();
+  res.json({
+    success: true,
+    message: "Synthetic tampering injected into test audit block.",
+    tampered,
+  });
+});
+
+app.post("/api/audit/reset-tamper", (req, res) => {
+  const restored = restoreAuditChain();
+  res.json({
+    success: restored,
+    message: restored ? "Audit chain restored to untampered state." : "No backup state found.",
+  });
+});
+
+app.get("/api/audit/retention", (req, res) => {
+  const policy = getRetentionPolicy();
+  res.json(policy);
+});
+
+app.get("/api/security/alerts", (req, res) => {
+  const { hospitalId } = req.query;
+  const alerts = getSecurityAlerts(typeof hospitalId === "string" ? hospitalId : undefined);
+  res.json(alerts);
+});
+
+app.post("/api/security/alerts/:alertId/review", (req, res) => {
+  const { alertId } = req.params;
+  const { reviewerName, notes, status } = req.body;
+  const caller = resolveCaller(req);
+
+  const reviewer = reviewerName || (caller ? caller.name : "Security Officer");
+  const updated = reviewSecurityAlert(alertId, reviewer, notes || "Reviewed and documented.", status || "REVIEWED");
+
+  if (!updated) {
+    return res.status(404).json({ error: "Alert not found." });
+  }
+
+  recordAuditEvent({
+    eventType: "SECURITY_ALERT_REVIEWED",
+    actorId: caller ? caller.id : "SEC1",
+    actorName: reviewer,
+    actorRole: "SECURITY_ADMIN",
+    hospitalId: caller ? caller.hospitalId : "LUTH",
+    action: "REVIEW_ALERT",
+    resource: alertId,
+    decision: "ALLOW",
+    purpose: `Security incident ${alertId} reviewed. Status: ${status || "REVIEWED"}`,
+  });
+
+  res.json({ success: true, alert: updated });
+});
+
+// ─── DOWNTIME & RESILIENCE ENDPOINTS ─────────────────────────────────────────
+
+app.get("/api/downtime/status", (req, res) => {
+  const state = getDowntimeState();
+  res.json(state);
+});
+
+app.post("/api/downtime/toggle", (req, res) => {
+  const { active } = req.body;
+  const newState = setDowntimeOutage(Boolean(active));
+
+  recordAuditEvent({
+    eventType: active ? "DOWNTIME_OUTAGE_TRIGGERED" : "DOWNTIME_OUTAGE_RESTORED",
+    actorId: "SYSTEM_OPERATIONS",
+    actorName: "Downtime Simulator",
+    actorRole: "SECURITY_ADMIN",
+    hospitalId: "LUTH",
+    action: "TOGGLE_DOWNTIME",
+    resource: "HIGH_AVAILABILITY_CONTROLLER",
+    decision: "ALLOW",
+    purpose: active
+      ? "Simulated power/internet outage activated. System degraded to offline fallback SOP."
+      : "Connectivity restored. Re-enabling remote discovery and reconciliation.",
+  });
+
+  res.json({ success: true, downtime: newState });
+});
+
+app.post("/api/downtime/offline-log", (req, res) => {
+  const { actorId, actorName, actorRole, hospitalId, patientMedID, action, reason } = req.body;
+  const queued = queueOfflineEvent({
+    actorId: actorId || "DOC1",
+    actorName: actorName || "Dr. James Bello",
+    actorRole: actorRole || "DOCTOR",
+    hospitalId: hospitalId || "LUTH",
+    patientMedID: patientMedID || "MD38281726",
+    action: action || "EMERGENCY_OFFLINE_ACCESS",
+    reason: reason || "Manual paper emergency procedure (Form MD-DT-01)",
+  });
+  res.json({ success: true, queued });
+});
+
+app.post("/api/downtime/reconcile", (req, res) => {
+  const result = reconcileOfflineEvents();
+  res.json({ success: true, ...result });
+});
+
+// ─── SECURED AI CLINICAL BRIEF & CHATBOT ─────────────────────────────────────
 
 function formatRecordsForContext(patientName: string, records: { [hospitalName: string]: Encounter[] }): string {
   let output = `PATIENT: ${patientName}\n\n`;
@@ -1076,6 +1834,11 @@ app.post("/api/gemini/clinical-brief", async (req, res) => {
     return res.status(400).json({ error: "Patient name and retrieved records context are required." });
   }
 
+  const caller = resolveCaller(req);
+  if (caller && (caller.role === "RECORDS_CLERK" || caller.role === "HOSPITAL_ADMIN")) {
+    return res.status(403).json({ error: "Access Denied: AI Clinical Brief is restricted to treating clinicians." });
+  }
+
   const contextStr = formatRecordsForContext(patientName, retrievedRecords);
 
   const systemInstruction = `You are an expert AI Clinical Assistant powering MedID, a national health identity platform.
@@ -1111,10 +1874,22 @@ You MUST follow this exact structure verbatim with bold Markdown headers:
 
 Never include mock system jargon like "STATUS: LIVE" or credit lines. Use professional medical terminology.`;
 
+  recordAuditEvent({
+    eventType: "AI_CLINICAL_BRIEF_GENERATED",
+    actorId: caller ? caller.id : "DOC1",
+    actorName: caller ? caller.name : "Treating Clinician",
+    actorRole: caller ? caller.role : "DOCTOR",
+    hospitalId: caller ? caller.hospitalId : "LUTH",
+    action: "GENERATE_AI_BRIEF",
+    resource: "GEMINI_CLINICAL_COPILOT",
+    decision: "ALLOW",
+    purpose: `AI clinical brief generated for patient ${patientName}`,
+  });
+
   if (ai) {
     try {
       const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
+        model: "gemini-2.5-flash",
         contents: `Generate a clinical briefing from the following hospital records:\n\n${contextStr}`,
         config: {
           systemInstruction,
@@ -1140,6 +1915,11 @@ app.post("/api/gemini/chat", async (req, res) => {
     return res.status(400).json({ error: "Missing records context or message logs." });
   }
 
+  const caller = resolveCaller(req);
+  if (caller && (caller.role === "RECORDS_CLERK" || caller.role === "HOSPITAL_ADMIN")) {
+    return res.status(403).json({ error: "Access Denied: AI Copilot queries are restricted to treating clinicians." });
+  }
+
   const contextStr = formatRecordsForContext(patientName, retrievedRecords);
   const userMessage = messages[messages.length - 1]?.content;
 
@@ -1155,6 +1935,18 @@ Rule 3: If the information does NOT exist in the retrieved records, you MUST say
 Do not invent anything. Do not seek external knowledge.
 Rule 4: Keep your answer highly professional, clinical, and directly relevant to the patient's care.`;
 
+  recordAuditEvent({
+    eventType: "AI_COPILOT_QUERY",
+    actorId: caller ? caller.id : "DOC1",
+    actorName: caller ? caller.name : "Treating Clinician",
+    actorRole: caller ? caller.role : "DOCTOR",
+    hospitalId: caller ? caller.hospitalId : "LUTH",
+    action: "QUERY_AI_COPILOT",
+    resource: "GEMINI_CLINICAL_COPILOT",
+    decision: "ALLOW",
+    purpose: `AI clinical copilot query for patient ${patientName}`,
+  });
+
   if (ai) {
     try {
       const formattedContents = messages.map((m: any) => ({
@@ -1163,7 +1955,7 @@ Rule 4: Keep your answer highly professional, clinical, and directly relevant to
       }));
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
+        model: "gemini-2.5-flash",
         contents: formattedContents,
         config: {
           systemInstruction,
@@ -1284,6 +2076,4 @@ function generateOfflineChatAnswer(userMsg: string, recordContext: string): stri
   return `Based on the retrieved medical records, the patient is currently stable. For detailed queries, please check specific encounters or consult with the primary specialist. (Note: Running in high-fidelity offline backup mode).`;
 }
 
-export default function handler(req: any, res: any) {
-  app(req, res);
-}
+export default app;

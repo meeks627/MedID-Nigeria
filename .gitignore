@@ -7,3 +7,5 @@ coverage/
 .env*
 !.env.example
 medid-db.json
+medid-audit-chain.json*
+medid-security-alerts.json

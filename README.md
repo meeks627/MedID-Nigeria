@@ -1,135 +1,75 @@
 # 🩺 MedID Nigeria
 
-> **One Identity. Every Hospital. Better Care.**
+> **One Identity. Every Hospital. Better Care.**  
+> **NiTDA Hackathon — Track C (Health & Medical Systems) — Challenge C1: Safe Access to Patient Records**
 
-MedID is an AI-powered National Healthcare Identity & Interoperability Platform that enables healthcare providers to securely identify patients and retrieve medical records across participating hospitals using a single Medical ID.
-
-Unlike traditional Electronic Health Record (EHR) systems, MedID does **not** replace hospital software. Instead, it acts as a secure identity and interoperability layer that connects existing hospital systems, enabling continuity of care while hospitals remain owners of their patient records.
-
----
-
-## 🚀 Live Demo
-
-🌐 **Application**
-
-https://med-id-nigeria-3ucs.vercel.app/
-
-### 🔑 Demo Credentials
-
-| Role | ID / Email | Password / PIN |
-|------|-----------|----------------|
-| 🏥 Hospital Admin | `LUTH` | `ADMIN123` |
-| 👨‍⚕️ Doctor | `james.bello@luth.org` | License: `MDN-2015-8831` |
-| 👤 Patient | `MD38281726` (Sarah Johnson) | PIN: `1234` |
-
-> You can also **register new** hospitals, doctors, and patients directly inside the app.
+MedID is an AI-assisted National Healthcare Identity, Contextual Authorization, and Interoperability Platform for Nigeria. Unlike traditional Electronic Health Record (EHR) systems, MedID does **not** replace hospital software. Instead, it acts as a secure identity, access governance, and tamper-evident audit layer that connects existing hospital systems while facilities remain owners of their patient records.
 
 ---
 
-## 📖 How to Explore MedID
+## 🏆 NiTDA Track C1 Capabilities Implemented
 
-MedID supports three primary user roles.
-
-### 🏥 1. Hospital Administrator
-
-Register a new hospital or log in as an existing administrator.
-
-Responsibilities include:
-
-- Register clinicians
-- Manage doctors
-- View hospital activity
-- Monitor access logs
-- Manage Emergency Override Codes
+- 🛡️ **Central Authentication & Session Layer**: Cryptographically random bearer tokens (`crypto.randomBytes(24)`), brute-force rate-limiting, individual staff accounts, and server-side revocation.
+- 🎯 **Contextual Policy Decision Point (PDP)**: Access permissions depend on staff role (Doctor, Nurse, Records Clerk, Hospital Admin, Security Admin), facility affiliation, assigned ward, and active shift duty status (`ON_DUTY` vs `OFF_DUTY`).
+- 📂 **Record Section Classification**: Patient charts segregated into `IDENTITY_ADMIN`, `EMERGENCY_CRITICAL`, `ROUTINE_CLINICAL`, and `HIGHLY_RESTRICTED` sections with strict backend filtering.
+- 🚨 **Real-Time Automated Abuse Detection**: Immediate detection, HTTP 403 blocking, and `CRITICAL` severity alerting when non-clinical personnel (e.g. Records Clerk) attempt to inspect clinical records.
+- 🚑 **Governed Break-Glass Emergency Access**: Biometric match simulation, mandatory clinical reason, 15-minute live countdown timer, emergency-scoped clinical presentation, unavoidable audit logging, and explicit revocation.
+- ⛓️ **Cryptographic Tamper-Evident Audit Chain**: SHA-256 block hash chaining anchored to an immutable Genesis Block (`AUDIT-000000`). Live verification engine detects block alterations, deletions, or reordering. Includes a 1-click test tampering attack harness for judges.
+- 🔒 **365-Day Retention Lock**: Storage retention lock policy enforcing immutable log preservation aligned with the Nigeria Data Protection Act (NDPA).
+- ⚡ **Downtime & Low-Connectivity Resilience**: Outage detection matrix, simulated blackout mode, Form MD-DT-01 Emergency Offline Standard Operating Procedure, bounded local queue, and post-restoration reconciliation.
+- 🤖 **Secured AI Clinical Copilot**: Gemini AI Clinical Brief and chatbot grounded strictly in authorized chart sections, preventing data exfiltration and prompt injection.
 
 ---
 
-### 👨‍⚕️ 2. Doctor
+## 🔑 Demo Personas & Credentials
 
-Doctors can:
-
-- Search patients using Medical ID
-- Access patient records
-- View AI Clinical Briefs
-- Chat with the AI Medical Assistant
-- Review medical history
-- Perform Emergency Access through fingerprint simulation
-
----
-
-### 👤 3. Patient
-
-Patients can:
-
-- Register with their NIN (simulated)
-- Receive a unique Medical ID
-- View their profile
-- Track which clinicians have accessed their records
+| Role | Name & Affiliation | Email / ID | Credential | Key Test Scenario |
+|:---|:---|:---|:---|:---|
+| 👨‍⚕️ **Doctor** | Dr. James Bello (LUTH) | `james.bello@luth.org` | License: `MDN-2015-8831` | Routine consultation, duty shift toggle, emergency break-glass |
+| 🩺 **Nurse** | Nurse Chidinma Eze (LUTH) | `chidinma.eze@luth.org` | License: `NUR-2020-5519` | Emergency-critical and triage notes access |
+| 📋 **Records Clerk** | Ibrahim Musa (LUTH) | `ibrahim.musa@luth.org` | Credential: `REC-REG-2022` | **Abuse Test**: Demographics search allowed; clinical chart retrieval blocked (403) |
+| 🏥 **Hospital Admin**| LUTH Administration | `LUTH` | Password: `ADMIN123` | Clinician management, emergency key rotation (no clinical access) |
+| 🛡️ **Security Officer**| Alhaji Tunde Bakare | `security.officer@medid.gov.ng` | Session Bearer | Cryptographic audit chain verification, tamper demo, abuse alert review |
+| 👤 **Patient** | Sarah Johnson | `MD38281726` | PIN: `1234` | NIN-linked identity card, immutable access audit history |
 
 ---
 
-## 🚑 Demo Workflow
+## 🧪 Automated Testing & Verification
 
-### Routine Consultation
+Run the comprehensive 25-point automated security test suite:
+```bash
+npm test
+```
 
-1. Register or log in as a Hospital Administrator.
-2. Register a Doctor.
-3. Register a Patient.
-4. Log in as the Doctor.
-5. Search using the patient's Medical ID.
-6. Review the AI Clinical Brief.
-7. Ask follow-up questions using the AI Assistant.
+Run TypeScript compilation check:
+```bash
+npm run lint
+```
 
----
-
-### Emergency Consultation
-
-1. Select **Fingerprint Identification**.
-2. Simulate patient identification via NIN-linked biometrics.
-3. Enter the Hospital Emergency Override Code.
-4. Retrieve the emergency medical record.
-5. Review the AI Clinical Brief before treatment.
+Build production bundle:
+```bash
+npm run build
+```
 
 ---
 
-## ✨ Features
+## 📚 Technical Documentation
 
-- National Medical ID Generation
-- Hospital Registration
-- Doctor Registration
-- Patient Registration
-- AI Clinical Brief
-- AI Medical Assistant
-- Emergency Fingerprint Access (Simulated)
-- NIN-linked Identity (Simulated)
-- Hospital Access Logs
-- Role-Based Authentication
-- QR Code Support
-- Multi-Hospital Architecture
-- Audit Logging
+- 📄 [Security Baseline Report](docs/SECURITY_BASELINE.md)
+- 🏗️ [Technical Architecture Specification](docs/ARCHITECTURE.md)
+- 🔐 [Access Control & Authorization Model](docs/ACCESS_CONTROL.md)
+- ⛓️ [Cryptographic Audit & Retention Policy](docs/AUDIT_AND_RETENTION.md)
+- 🚑 [Governed Break-Glass Emergency Access](docs/EMERGENCY_ACCESS.md)
+- ⚡ [Downtime & Low-Connectivity Operational Procedure](docs/DOWNTIME_PROCEDURE.md)
+- 🎭 [Judge Live Demonstration Walkthrough Guide](docs/DEMO_WALKTHROUGH.md)
+- 🧪 [Automated Security Testing Guide](docs/TESTING.md)
 
 ---
 
 ## 🛠 Tech Stack
 
-- Next.js
-- React
-- Tailwind CSS
-- FastAPI
-- PostgreSQL / SQLite
-- Gemini API
-- Vercel
-
----
-
-## ⚠ Disclaimer
-
-MedID is a Proof of Concept demonstrating how a national healthcare identity and interoperability platform could operate in Nigeria.
-
-NIN verification, fingerprint authentication, hospital integrations, notifications, and interoperability workflows are currently simulated for demonstration purposes.
-
----
-
-## 🌍 Vision
-
-We envision a future where every Nigerian has a secure, portable medical identity that enables authorized healthcare professionals to access the right information at the right time—improving continuity of care, reducing medical errors, and ultimately saving lives.
+- **Frontend**: React 19, Vite 6, Tailwind CSS 4, Lucide Icons, Framer Motion
+- **Backend**: Express 4, Node.js 22, Vercel Serverless Function architecture
+- **Security & Crypto**: SHA-256 block hash chaining, Bcrypt password/PIN hashing, crypto random sessions
+- **AI**: Google GenAI SDK (`@google/genai`) with Gemini 2.5 Flash and offline rule-based clinical fallback
+- **Persistence**: JSON-backed local storage (`medid-db.json`) and `/tmp` filesystem on Vercel
